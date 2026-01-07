@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { Plus, Trash2, Check, Calendar, Mail, Phone } from 'lucide-react';
+import { supabase } from './lib/supabase';
 
 export default function App() {
   const [step, setStep] = useState(1);
+  const [accountId, setAccountId] = useState(null);
   const [familyMembers, setFamilyMembers] = useState([]);
   const [newMember, setNewMember] = useState('');
   const [confirmPref, setConfirmPref] = useState('clarification-only');
@@ -11,29 +13,291 @@ export default function App() {
   const [newPhone, setNewPhone] = useState('');
   const [newEmail, setNewEmail] = useState('');
   const [setupComplete, setSetupComplete] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  // Load saved data on mount
+  // Initialize or load account
   useEffect(() => {
-    const loadData = () => {
-      try {
-        const saved = localStorage.getItem('family-schedule-config');
-        if (saved) {
-          const config = JSON.parse(saved);
-          setFamilyMembers(config.familyMembers || []);
-          setConfirmPref(config.confirmPref || 'clarification-only');
-          setCalendarConnected(config.calendarConnected || false);
-          setApprovedSenders(config.approvedSenders || { phones: [], emails: [] });
-          setSetupComplete(config.setupComplete || false);
-        }
-      } catch (err) {
-        console.log('No saved config found, starting fresh');
-      }
-    };
-    loadData();
+    initializeAccount();
   }, []);
 
-  // Save data whenever it changes
-  const saveConfig = () => {
+  const initializeAccount = async () => {
+    if (!supabase) {
+      console.log('Running in demo mode without Supabase');
+      loadFromLocalStorage();
+      setLoading(false);
+      return;
+    }
+
+    try {
+      // Check if we have an account ID in localStorage
+      let savedAccountId = localStorage.getItem('accountId');
+      
+      if (!savedAccountId) {
+        // Create a new account
+        const { data, error } = await supabase
+          .from('accounts')
+          .insert([{ 
+            confirmation_preference: 'clarification-only',
+            sms_number: '+1-555-' + Math.floor(Math.random() * 9000000 + 1000000),
+            email_address: 'schedule-' + Math.random().toString(36).substring(7) + '@familyassist.app'
+          }])
+          .select()
+          .single();
+
+        if (error) throw error;
+        
+        savedAccountId = data.id;
+        localStorage.setItem('accountId', savedAccountId);
+      }
+
+      setAccountId(savedAccountId);
+      
+      // Load existing data from Supabase
+      await loadFromSupabase(savedAccountId);
+      
+    } catch (error) {
+      console.error('Error initializing account:', error);
+      loadFromLocalStorage();
+    }
+    
+    setLoading(false);
+  };
+
+  const loadFromLocalStorage = () => {
+    try {
+      const saved = localStorage.getItem('family-schedule-config');
+      if (saved) {
+        const config = JSON.parse(saved);
+        setFamilyMembers(config.familyMembers || []);
+        setConfirmPref(config.confirmPref || 'clarification-only');
+        setCalendarConnected(config.calendarConnected || false);
+        setApprovedSenders(config.approvedSenders || { phones: [], emails: [] });
+        setSetupComplete(config.setupComplete || false);
+      }
+    } catch (err) {
+      console.log('No saved config found');
+    }
+  };
+
+  const loadFromSupabase = async (accId) => {
+    try {
+      // Load account settings
+      const { data: account } = await supabase
+        .from('accounts')
+        .select('*')
+        .eq('id', accId)
+        .single();
+
+      if (account) {
+        setConfirmPref(account.confirmation_preference);
+        setCalendarConnected(!!account.google_calendar_id);
+      }
+
+      // Load family members
+      const { data: members } = await supabase
+        .from('family_members')
+        .select('*')
+        .eq('account_id', accId);
+
+      if (members) {
+        setFamilyMembers(members.map(m => ({ id: m.id, name: m.name })));
+      }
+
+      // Load approved senders
+      const { data: senders } = await supabase
+        .from('approved_senders')
+        .select('*')
+        .eq('account_id', accId);
+
+      if (senders) {
+        const phones = senders.filter(s => s.sender_type === 'phone').map(s => s.sender_value);
+        const emails = senders.filter(s => s.sender_type === 'email').map(s => s.sender_value);
+        setApprovedSenders({ phones, emails });
+      }
+
+      setSetupComplete(members && members.length > 0);
+
+    } catch (error) {
+      console.error('Error loading from Supabase:', error);
+    }
+  };
+
+  const addFamilyMember = async () => {
+    if (!newMember.trim()) return;
+
+    if (supabase && accountId) {
+      try {
+        const { data, error } = await supabase
+          .from('family_members')
+          .insert([{ 
+            account_id: accountId, 
+            name: newMember.trim() 
+          }])
+          .select()
+          .single();
+
+        if (error) throw error;
+        
+        setFamilyMembers([...familyMembers, { id: data.id, name: data.name }]);
+        setNewMember('');
+      } catch (error) {
+        console.error('Error adding family member:', error);
+        alert('Failed to add family member. Please try again.');
+      }
+    } else {
+      // Fallback to localStorage
+      setFamilyMembers([...familyMembers, { id: Date.now(), name: newMember.trim() }]);
+      setNewMember('');
+      saveToLocalStorage();
+    }
+  };
+
+  const removeFamilyMember = async (id) => {
+    if (supabase && accountId) {
+      try {
+        const { error } = await supabase
+          .from('family_members')
+          .delete()
+          .eq('id', id);
+
+        if (error) throw error;
+        
+        setFamilyMembers(familyMembers.filter(m => m.id !== id));
+      } catch (error) {
+        console.error('Error removing family member:', error);
+        alert('Failed to remove family member. Please try again.');
+      }
+    } else {
+      setFamilyMembers(familyMembers.filter(m => m.id !== id));
+      saveToLocalStorage();
+    }
+  };
+
+  const addPhone = async () => {
+    if (!newPhone.trim()) return;
+
+    if (supabase && accountId) {
+      try {
+        const { error } = await supabase
+          .from('approved_senders')
+          .insert([{ 
+            account_id: accountId, 
+            sender_type: 'phone',
+            sender_value: newPhone.trim() 
+          }]);
+
+        if (error) throw error;
+        
+        setApprovedSenders({
+          ...approvedSenders,
+          phones: [...approvedSenders.phones, newPhone.trim()]
+        });
+        setNewPhone('');
+      } catch (error) {
+        console.error('Error adding phone:', error);
+        alert('Failed to add phone number. Please try again.');
+      }
+    } else {
+      setApprovedSenders({
+        ...approvedSenders,
+        phones: [...approvedSenders.phones, newPhone.trim()]
+      });
+      setNewPhone('');
+      saveToLocalStorage();
+    }
+  };
+
+  const addEmail = async () => {
+    if (!newEmail.trim()) return;
+
+    if (supabase && accountId) {
+      try {
+        const { error } = await supabase
+          .from('approved_senders')
+          .insert([{ 
+            account_id: accountId, 
+            sender_type: 'email',
+            sender_value: newEmail.trim() 
+          }]);
+
+        if (error) throw error;
+        
+        setApprovedSenders({
+          ...approvedSenders,
+          emails: [...approvedSenders.emails, newEmail.trim()]
+        });
+        setNewEmail('');
+      } catch (error) {
+        console.error('Error adding email:', error);
+        alert('Failed to add email address. Please try again.');
+      }
+    } else {
+      setApprovedSenders({
+        ...approvedSenders,
+        emails: [...approvedSenders.emails, newEmail.trim()]
+      });
+      setNewEmail('');
+      saveToLocalStorage();
+    }
+  };
+
+  const removePhone = async (phone) => {
+    if (supabase && accountId) {
+      try {
+        const { error } = await supabase
+          .from('approved_senders')
+          .delete()
+          .eq('account_id', accountId)
+          .eq('sender_type', 'phone')
+          .eq('sender_value', phone);
+
+        if (error) throw error;
+        
+        setApprovedSenders({
+          ...approvedSenders,
+          phones: approvedSenders.phones.filter(p => p !== phone)
+        });
+      } catch (error) {
+        console.error('Error removing phone:', error);
+      }
+    } else {
+      setApprovedSenders({
+        ...approvedSenders,
+        phones: approvedSenders.phones.filter(p => p !== phone)
+      });
+      saveToLocalStorage();
+    }
+  };
+
+  const removeEmail = async (email) => {
+    if (supabase && accountId) {
+      try {
+        const { error } = await supabase
+          .from('approved_senders')
+          .delete()
+          .eq('account_id', accountId)
+          .eq('sender_type', 'email')
+          .eq('sender_value', email);
+
+        if (error) throw error;
+        
+        setApprovedSenders({
+          ...approvedSenders,
+          emails: approvedSenders.emails.filter(e => e !== email)
+        });
+      } catch (error) {
+        console.error('Error removing email:', error);
+      }
+    } else {
+      setApprovedSenders({
+        ...approvedSenders,
+        emails: approvedSenders.emails.filter(e => e !== email)
+      });
+      saveToLocalStorage();
+    }
+  };
+
+  const saveToLocalStorage = () => {
     const config = {
       familyMembers,
       confirmPref,
@@ -41,67 +305,31 @@ export default function App() {
       approvedSenders,
       setupComplete
     };
-    try {
-      localStorage.setItem('family-schedule-config', JSON.stringify(config));
-    } catch (err) {
-      console.error('Failed to save config:', err);
+    localStorage.setItem('family-schedule-config', JSON.stringify(config));
+  };
+
+  const updateConfirmPref = async (pref) => {
+    setConfirmPref(pref);
+    
+    if (supabase && accountId) {
+      try {
+        await supabase
+          .from('accounts')
+          .update({ confirmation_preference: pref })
+          .eq('id', accountId);
+      } catch (error) {
+        console.error('Error updating preference:', error);
+      }
+    } else {
+      saveToLocalStorage();
     }
-  };
-
-  useEffect(() => {
-    if (familyMembers.length > 0 || calendarConnected || approvedSenders.phones.length > 0) {
-      saveConfig();
-    }
-  }, [familyMembers, confirmPref, calendarConnected, approvedSenders, setupComplete]);
-
-  const addFamilyMember = () => {
-    if (newMember.trim()) {
-      setFamilyMembers([...familyMembers, { id: Date.now(), name: newMember.trim() }]);
-      setNewMember('');
-    }
-  };
-
-  const removeFamilyMember = (id) => {
-    setFamilyMembers(familyMembers.filter(m => m.id !== id));
-  };
-
-  const addPhone = () => {
-    if (newPhone.trim()) {
-      setApprovedSenders({
-        ...approvedSenders,
-        phones: [...approvedSenders.phones, newPhone.trim()]
-      });
-      setNewPhone('');
-    }
-  };
-
-  const addEmail = () => {
-    if (newEmail.trim()) {
-      setApprovedSenders({
-        ...approvedSenders,
-        emails: [...approvedSenders.emails, newEmail.trim()]
-      });
-      setNewEmail('');
-    }
-  };
-
-  const removePhone = (phone) => {
-    setApprovedSenders({
-      ...approvedSenders,
-      phones: approvedSenders.phones.filter(p => p !== phone)
-    });
-  };
-
-  const removeEmail = (email) => {
-    setApprovedSenders({
-      ...approvedSenders,
-      emails: approvedSenders.emails.filter(e => e !== email)
-    });
   };
 
   const completeSetup = () => {
     setSetupComplete(true);
-    saveConfig();
+    if (!supabase) {
+      saveToLocalStorage();
+    }
   };
 
   const nextStep = () => {
@@ -128,6 +356,17 @@ export default function App() {
     if (step > 1) setStep(step - 1);
   };
 
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
   if (setupComplete) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
@@ -138,6 +377,7 @@ export default function App() {
             </div>
             <h1 className="text-3xl font-bold text-gray-900 mb-2">Setup Complete!</h1>
             <p className="text-gray-600">Your Family Schedule Assistant is ready to use</p>
+            {supabase && <p className="text-sm text-green-600 mt-2">✓ Connected to Supabase</p>}
           </div>
 
           <div className="space-y-6">
@@ -289,7 +529,7 @@ export default function App() {
                     name="confirm"
                     value={option.value}
                     checked={confirmPref === option.value}
-                    onChange={(e) => setConfirmPref(e.target.value)}
+                    onChange={(e) => updateConfirmPref(e.target.value)}
                     className="mr-3"
                   />
                   <span className="font-semibold">{option.label}</span>

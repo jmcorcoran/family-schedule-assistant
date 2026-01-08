@@ -167,7 +167,15 @@ export default function App() {
         setApprovedSenders({ phones, emails });
       }
 
-      setSetupComplete(members && members.length > 0);
+      // Don't auto-mark setup as complete - let the user finish the wizard
+      // Only restore setupComplete state if it was explicitly saved
+      const savedConfig = localStorage.getItem('family-schedule-config');
+      if (savedConfig) {
+        const config = JSON.parse(savedConfig);
+        if (config.setupComplete) {
+          setSetupComplete(true);
+        }
+      }
 
     } catch (error) {
       console.error('Error loading from Supabase:', error);
@@ -379,9 +387,15 @@ export default function App() {
 
   const completeSetup = () => {
     setSetupComplete(true);
-    if (!supabase) {
-      saveToLocalStorage();
-    }
+    // Always save to localStorage so setup state persists
+    const config = {
+      familyMembers,
+      confirmPref,
+      calendarConnected,
+      approvedSenders,
+      setupComplete: true
+    };
+    localStorage.setItem('family-schedule-config', JSON.stringify(config));
   };
 
   const nextStep = () => {

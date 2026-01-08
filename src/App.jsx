@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Trash2, Check, Calendar, Mail, Phone } from 'lucide-react';
+import { Plus, Trash2, Check, Calendar, Mail, Phone, LogOut } from 'lucide-react';
 import { supabase } from './lib/supabase';
+import Auth from './components/Auth';
 
 export default function App() {
+  const [session, setSession] = useState(null);
   const [step, setStep] = useState(1);
   const [accountId, setAccountId] = useState(null);
   const [familyMembers, setFamilyMembers] = useState([]);
@@ -18,6 +20,15 @@ export default function App() {
   // Initialize or load account
   useEffect(() => {
     initializeAccount();
+
+    // Set up auth state listener
+    if (supabase) {
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+        setSession(session);
+      });
+
+      return () => subscription.unsubscribe();
+    }
   }, []);
 
   const initializeAccount = async () => {
@@ -29,6 +40,15 @@ export default function App() {
     }
 
     try {
+      // Check if user is authenticated
+      const { data: { session } } = await supabase.auth.getSession();
+      setSession(session);
+
+      if (!session) {
+        setLoading(false);
+        return;
+      }
+
       // Check if we have an account ID in localStorage
       let savedAccountId = localStorage.getItem('accountId');
       
@@ -356,6 +376,24 @@ export default function App() {
     if (step > 1) setStep(step - 1);
   };
 
+  const handleLogout = async () => {
+    if (supabase) {
+      await supabase.auth.signOut();
+      setSession(null);
+      setAccountId(null);
+      setFamilyMembers([]);
+      setApprovedSenders({ phones: [], emails: [] });
+      setSetupComplete(false);
+      setStep(1);
+      localStorage.removeItem('accountId');
+    }
+  };
+
+  // Show auth screen if using Supabase and not authenticated
+  if (supabase && !session && !loading) {
+    return <Auth />;
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center">
@@ -412,12 +450,23 @@ export default function App() {
               </div>
             </div>
 
-            <button
-              onClick={() => setSetupComplete(false)}
-              className="w-full py-3 bg-gray-200 text-gray-700 rounded-lg font-medium hover:bg-gray-300 transition"
-            >
-              Edit Settings
-            </button>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setSetupComplete(false)}
+                className="flex-1 py-3 bg-gray-200 text-gray-700 rounded-lg font-medium hover:bg-gray-300 transition"
+              >
+                Edit Settings
+              </button>
+              {supabase && session && (
+                <button
+                  onClick={handleLogout}
+                  className="px-6 py-3 bg-red-50 text-red-600 rounded-lg font-medium hover:bg-red-100 transition flex items-center gap-2"
+                >
+                  <LogOut className="w-5 h-5" />
+                  Logout
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -428,8 +477,21 @@ export default function App() {
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
       <div className="max-w-2xl mx-auto bg-white rounded-2xl shadow-xl p-8">
         <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">Family Schedule Assistant</h1>
-          <p className="text-gray-600">Set up your account in a few simple steps</p>
+          <div className="flex justify-between items-start mb-4">
+            <div>
+              <h1 className="text-3xl font-bold text-gray-900 mb-2">Family Schedule Assistant</h1>
+              <p className="text-gray-600">Set up your account in a few simple steps</p>
+            </div>
+            {supabase && session && (
+              <button
+                onClick={handleLogout}
+                className="px-4 py-2 bg-red-50 text-red-600 rounded-lg font-medium hover:bg-red-100 transition flex items-center gap-2 text-sm"
+              >
+                <LogOut className="w-4 h-4" />
+                Logout
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Progress Bar */}

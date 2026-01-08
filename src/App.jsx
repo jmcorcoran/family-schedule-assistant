@@ -98,6 +98,21 @@ export default function App() {
 
         accountData = data;
         console.log('Account created with ID:', accountData.id);
+
+        // Auto-add user's email as an approved sender
+        console.log('Auto-adding user email as approved sender:', session.user.email);
+        const { error: senderError } = await supabase
+          .from('approved_senders')
+          .insert([{
+            account_id: accountData.id,
+            sender_type: 'email',
+            sender_value: session.user.email
+          }]);
+
+        if (senderError) {
+          console.error('Error adding user email as approved sender:', senderError);
+          // Don't throw - this is non-critical
+        }
       }
 
       // Save to localStorage for OAuth callback
@@ -755,6 +770,9 @@ export default function App() {
             <div>
               <h2 className="text-2xl font-bold mb-2">Approved senders</h2>
               <p className="text-gray-600">Only messages from these contacts will be processed</p>
+              {session?.user?.email && (
+                <p className="text-sm text-blue-600 mt-2">✓ Your email ({session.user.email}) is automatically approved</p>
+              )}
             </div>
 
             <div>

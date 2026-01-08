@@ -12,6 +12,10 @@ export default function Auth() {
   const handleSubmit = async (e) => {
     e.preventDefault();
 
+    console.log('=== Auth Submit ===');
+    console.log('isSignUp:', isSignUp);
+    console.log('email:', email);
+
     if (!email.trim() || !password.trim()) {
       setError('Please enter both email and password');
       return;
@@ -28,30 +32,45 @@ export default function Auth() {
     try {
       if (isSignUp) {
         // Sign up
-        const { error } = await supabase.auth.signUp({
+        console.log('Attempting sign up...');
+        const { data, error } = await supabase.auth.signUp({
           email: email.trim(),
           password: password.trim(),
         });
 
+        console.log('Sign up response:', { data, error });
         if (error) throw error;
 
         // Auto sign in after sign up
-        const { error: signInError } = await supabase.auth.signInWithPassword({
+        console.log('Auto signing in after sign up...');
+        const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
           email: email.trim(),
           password: password.trim(),
         });
 
+        console.log('Sign in response:', { signInData, signInError });
         if (signInError) throw signInError;
+
+        console.log('Sign up and sign in successful!');
       } else {
         // Sign in
-        const { error } = await supabase.auth.signInWithPassword({
+        console.log('Attempting sign in...');
+        const { data, error } = await supabase.auth.signInWithPassword({
           email: email.trim(),
           password: password.trim(),
         });
 
+        console.log('Sign in response:', { data, error });
         if (error) throw error;
+
+        console.log('Sign in successful!');
       }
+
+      // Reload page to trigger account initialization
+      console.log('Reloading page to initialize account...');
+      window.location.reload();
     } catch (error) {
+      console.error('Auth error:', error);
       setError(error.message || 'Authentication failed');
     } finally {
       setLoading(false);

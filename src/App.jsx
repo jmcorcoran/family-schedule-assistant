@@ -34,6 +34,9 @@ export default function App() {
   }, []);
 
   const initializeAccount = async () => {
+    console.log('=== initializeAccount called ===');
+    console.log('supabase configured:', !!supabase);
+
     if (!supabase) {
       console.log('Running in demo mode without Supabase');
       loadFromLocalStorage();
@@ -43,22 +46,44 @@ export default function App() {
 
     try {
       // Check if user is authenticated
+      console.log('Checking auth session...');
       const { data: { session } } = await supabase.auth.getSession();
+      console.log('Session:', session ? 'found' : 'not found');
       setSession(session);
 
       if (!session) {
+        console.log('No session found, stopping initialization');
         setLoading(false);
         return;
       }
 
-      // Check if we have an account ID in localStorage
-      let savedAccountId = localStorage.getItem('accountId');
-      
-      if (!savedAccountId) {
-        // Create a new account
+      console.log('User authenticated:', session.user.email);
+
+      // Query for existing account by user_id
+      console.log('Looking for existing account for user:', session.user.id);
+      const { data: existingAccounts, error: queryError } = await supabase
+        .from('accounts')
+        .select('*')
+        .eq('user_id', session.user.id);
+
+      if (queryError) {
+        console.error('Error querying accounts:', queryError);
+        throw queryError;
+      }
+
+      let accountData;
+
+      if (existingAccounts && existingAccounts.length > 0) {
+        // Use existing account
+        accountData = existingAccounts[0];
+        console.log('Existing account found:', accountData.id);
+      } else {
+        // Create new account
+        console.log('No account found, creating new account...');
         const { data, error } = await supabase
           .from('accounts')
-          .insert([{ 
+          .insert([{
+            user_id: session.user.id,
             confirmation_preference: 'clarification-only',
             sms_number: '+1-555-' + Math.floor(Math.random() * 9000000 + 1000000),
             email_address: 'schedule-' + Math.random().toString(36).substring(7) + '@familyassist.app'
@@ -66,16 +91,21 @@ export default function App() {
           .select()
           .single();
 
-        if (error) throw error;
-        
-        savedAccountId = data.id;
-        localStorage.setItem('accountId', savedAccountId);
+        if (error) {
+          console.error('Error creating account:', error);
+          throw error;
+        }
+
+        accountData = data;
+        console.log('Account created with ID:', accountData.id);
       }
 
-      setAccountId(savedAccountId);
-      
+      // Save to localStorage for OAuth callback
+      localStorage.setItem('accountId', accountData.id);
+      setAccountId(accountData.id);
+
       // Load existing data from Supabase
-      await loadFromSupabase(savedAccountId);
+      await loadFromSupabase(accountData.id);
       
     } catch (error) {
       console.error('Error initializing account:', error);
@@ -383,8 +413,15 @@ export default function App() {
       // Get accountId from localStorage since state might not be loaded yet
       const savedAccountId = localStorage.getItem('accountId');
 
+      console.log('OAuth callback - checking localStorage...');
+      console.log('accountId from localStorage:', savedAccountId);
+      console.log('supabase configured:', !!supabase);
+      console.log('All localStorage keys:', Object.keys(localStorage));
+
       if (!savedAccountId || !supabase) {
         console.error('No account ID in localStorage or Supabase not configured');
+        console.error('savedAccountId:', savedAccountId);
+        console.error('supabase:', supabase);
         alert('Account not found. Please complete setup first.');
         window.location.href = '/';
         return;

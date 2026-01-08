@@ -380,17 +380,24 @@ export default function App() {
 
   const handleOAuthSuccess = async (tokens) => {
     try {
-      if (!accountId || !supabase) {
-        console.error('No account ID or Supabase not configured');
+      // Get accountId from localStorage since state might not be loaded yet
+      const savedAccountId = localStorage.getItem('accountId');
+
+      if (!savedAccountId || !supabase) {
+        console.error('No account ID in localStorage or Supabase not configured');
+        alert('Account not found. Please complete setup first.');
+        window.location.href = '/';
         return;
       }
+
+      console.log('Saving tokens for account:', savedAccountId);
 
       // Calculate token expiry (typically 3600 seconds = 1 hour)
       const expiresAt = new Date();
       expiresAt.setSeconds(expiresAt.getSeconds() + (tokens.expires_in || 3600));
 
       // Save tokens to Supabase
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('accounts')
         .update({
           google_access_token: tokens.access_token,
@@ -398,12 +405,15 @@ export default function App() {
           google_token_expires_at: expiresAt.toISOString(),
           google_calendar_id: 'primary' // We'll use the primary calendar
         })
-        .eq('id', accountId);
+        .eq('id', savedAccountId)
+        .select();
 
-      if (error) throw error;
+      if (error) {
+        console.error('Supabase error:', error);
+        throw error;
+      }
 
-      // Update local state
-      setCalendarConnected(true);
+      console.log('Tokens saved successfully:', data);
 
       // Redirect back to setup
       window.location.href = '/';

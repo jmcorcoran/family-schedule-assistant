@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Plus, Trash2, Check, Calendar, Mail, Phone, LogOut } from 'lucide-react';
 import { supabase } from './lib/supabase';
 import Auth from './components/Auth';
+import OAuthCallback from './components/OAuthCallback';
+import { getGoogleAuthUrl } from './lib/googleCalendar';
 
 export default function App() {
   const [session, setSession] = useState(null);
@@ -376,6 +378,42 @@ export default function App() {
     if (step > 1) setStep(step - 1);
   };
 
+  const handleOAuthSuccess = async (tokens) => {
+    try {
+      if (!accountId || !supabase) {
+        console.error('No account ID or Supabase not configured');
+        return;
+      }
+
+      // Calculate token expiry (typically 3600 seconds = 1 hour)
+      const expiresAt = new Date();
+      expiresAt.setSeconds(expiresAt.getSeconds() + (tokens.expires_in || 3600));
+
+      // Save tokens to Supabase
+      const { error } = await supabase
+        .from('accounts')
+        .update({
+          google_access_token: tokens.access_token,
+          google_refresh_token: tokens.refresh_token,
+          google_token_expires_at: expiresAt.toISOString(),
+          google_calendar_id: 'primary' // We'll use the primary calendar
+        })
+        .eq('id', accountId);
+
+      if (error) throw error;
+
+      // Update local state
+      setCalendarConnected(true);
+
+      // Redirect back to setup
+      window.location.href = '/';
+    } catch (error) {
+      console.error('Error saving Google tokens:', error);
+      alert('Failed to save calendar connection. Please try again.');
+      window.location.href = '/';
+    }
+  };
+
   const handleLogout = async () => {
     if (supabase) {
       await supabase.auth.signOut();
@@ -388,6 +426,20 @@ export default function App() {
       localStorage.removeItem('accountId');
     }
   };
+
+  // Handle OAuth callback
+  if (window.location.pathname === '/auth/callback') {
+    return (
+      <OAuthCallback
+        onSuccess={handleOAuthSuccess}
+        onError={(error) => {
+          console.error('OAuth error:', error);
+          alert('Failed to connect Google Calendar. Please try again.');
+          window.location.href = '/';
+        }}
+      />
+    );
+  }
 
   // Show auth screen if using Supabase and not authenticated
   if (supabase && !session && !loading) {
@@ -614,20 +666,23 @@ export default function App() {
               <div className="text-center py-12">
                 <Calendar className="w-16 h-16 text-gray-400 mx-auto mb-4" />
                 <button
-                  onClick={() => setCalendarConnected(true)}
+                  onClick={() => {
+                    // Redirect to Google OAuth
+                    window.location.href = getGoogleAuthUrl();
+                  }}
                   className="px-6 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition"
                 >
                   Connect Google Calendar
                 </button>
                 <p className="text-sm text-gray-500 mt-4">
-                  (In production, this would launch Google OAuth)
+                  You'll be redirected to Google to authorize calendar access
                 </p>
               </div>
             ) : (
               <div className="bg-green-50 border-2 border-green-200 rounded-lg p-6 text-center">
                 <Check className="w-12 h-12 text-green-600 mx-auto mb-3" />
                 <p className="font-semibold text-green-900">Calendar Connected!</p>
-                <p className="text-sm text-green-700 mt-1">john.doe@gmail.com</p>
+                <p className="text-sm text-green-700 mt-1">{session?.user?.email || 'Connected'}</p>
               </div>
             )}
           </div>

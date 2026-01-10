@@ -121,6 +121,13 @@ export default function App() {
 
       // Load existing data from Supabase
       await loadFromSupabase(accountData.id);
+
+      // Restore step if returning from OAuth
+      const returnToStep = localStorage.getItem('returnToStep');
+      if (returnToStep) {
+        setStep(parseInt(returnToStep));
+        localStorage.removeItem('returnToStep');
+      }
       
     } catch (error) {
       console.error('Error initializing account:', error);
@@ -444,7 +451,7 @@ export default function App() {
     localStorage.setItem('family-schedule-config', JSON.stringify(config));
   };
 
-  const nextStep = () => {
+  const nextStep = async () => {
     if (step === 1 && familyMembers.length === 0) {
       alert('Please add at least one family member');
       return;
@@ -453,14 +460,25 @@ export default function App() {
       alert('Please connect your Google Calendar');
       return;
     }
-    if (step === 4 && approvedSenders.phones.length === 0 && approvedSenders.emails.length === 0) {
-      alert('Please add at least one approved sender');
-      return;
+    if (step === 4) {
+      // Auto-save any entered phone/email before validating
+      if (newPhone.trim()) {
+        await addPhone();
+      }
+      if (newEmail.trim()) {
+        await addEmail();
+      }
+
+      // Now validate
+      if (approvedSenders.phones.length === 0 && approvedSenders.emails.length === 0 && !newPhone.trim() && !newEmail.trim()) {
+        alert('Please add at least one approved sender');
+        return;
+      }
     }
     if (step < 5) {
       setStep(step + 1);
     } else {
-      completeSetup();
+      await completeSetup();
     }
   };
 
@@ -512,7 +530,8 @@ export default function App() {
 
       console.log('Tokens saved successfully:', data);
 
-      // Redirect back to setup
+      // Redirect back to setup at step 3 with calendar connected
+      localStorage.setItem('returnToStep', '3');
       window.location.href = '/';
     } catch (error) {
       console.error('Error saving Google tokens:', error);
@@ -804,6 +823,7 @@ export default function App() {
               {session?.user?.email && (
                 <p className="text-sm text-blue-600 mt-2">✓ Your email ({session.user.email}) is automatically approved</p>
               )}
+              <p className="text-sm text-gray-500 mt-2">Enter contacts below and click Continue (or click + to add multiple)</p>
             </div>
 
             <div>

@@ -119,6 +119,9 @@ async function parseMessageWithClaude(
   familyMembers: string[],
   confirmationPref: string
 ): Promise<EventDetails> {
+  console.log("ANTHROPIC_API_KEY present:", !!ANTHROPIC_API_KEY);
+  console.log("API key first 10 chars:", ANTHROPIC_API_KEY?.substring(0, 10));
+
   const prompt = `You are a smart calendar assistant. Parse the following message and extract event details.
 
 Family members: ${familyMembers.join(", ")}
@@ -153,7 +156,7 @@ Respond ONLY with a JSON object in this exact format:
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-3-5-sonnet-20240620",
+      model: "claude-3-haiku-20240307",
       max_tokens: 1024,
       messages: [
         {
@@ -184,6 +187,8 @@ async function addToGoogleCalendar(
   refreshToken: string,
   eventDetails: EventDetails
 ): Promise<string> {
+  console.log("Creating Google Calendar event:", eventDetails);
+
   // Build the event object
   const event: any = {
     summary: eventDetails.title,
@@ -192,30 +197,31 @@ async function addToGoogleCalendar(
 
   // Handle date and time
   if (eventDetails.time) {
-    // Event with specific time
-    const startDateTime = `${eventDetails.date}T${eventDetails.time}:00`;
+    // Event with specific time - use full ISO 8601 format
+    const startDateTime = `${eventDetails.date}T${eventDetails.time}:00-05:00`; // EST timezone
     event.start = {
       dateTime: startDateTime,
-      timeZone: "America/New_York", // TODO: Make this configurable
+      timeZone: "America/New_York",
     };
 
     // Calculate end time (default 1 hour if no duration specified)
-    let endDateTime = startDateTime;
-    if (eventDetails.duration) {
-      // Simple duration parsing (e.g., "1 hour", "30 minutes")
-      // In production, you'd want more robust parsing
-      endDateTime = startDateTime; // TODO: Add duration logic
-    } else {
-      // Default 1 hour
-      const end = new Date(startDateTime);
-      end.setHours(end.getHours() + 1);
-      endDateTime = end.toISOString().slice(0, 16);
-    }
+    const startDate = new Date(eventDetails.date + "T" + eventDetails.time + ":00");
+    startDate.setHours(startDate.getHours() + 1);
+
+    const endYear = startDate.getFullYear();
+    const endMonth = String(startDate.getMonth() + 1).padStart(2, '0');
+    const endDay = String(startDate.getDate()).padStart(2, '0');
+    const endHour = String(startDate.getHours()).padStart(2, '0');
+    const endMin = String(startDate.getMinutes()).padStart(2, '0');
+
+    const endDateTime = `${endYear}-${endMonth}-${endDay}T${endHour}:${endMin}:00-05:00`;
 
     event.end = {
       dateTime: endDateTime,
       timeZone: "America/New_York",
     };
+
+    console.log("Event times:", { start: startDateTime, end: endDateTime });
   } else {
     // All-day event
     event.start = {
@@ -224,6 +230,7 @@ async function addToGoogleCalendar(
     event.end = {
       date: eventDetails.date,
     };
+    console.log("All-day event:", eventDetails.date);
   }
 
   // Add to Google Calendar

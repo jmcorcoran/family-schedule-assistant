@@ -464,9 +464,27 @@ export default function App() {
       // Auto-save any entered phone/email before validating
       if (newPhone.trim()) {
         await addPhone();
+        // Give state time to update
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
       if (newEmail.trim()) {
         await addEmail();
+        // Give state time to update
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+
+      // Reload from database to ensure state is fresh
+      if (supabase && accountId) {
+        const { data: senders } = await supabase
+          .from('approved_senders')
+          .select('*')
+          .eq('account_id', accountId);
+
+        if (senders) {
+          const phones = senders.filter(s => s.sender_type === 'phone').map(s => s.sender_value);
+          const emails = senders.filter(s => s.sender_type === 'email').map(s => s.sender_value);
+          setApprovedSenders({ phones, emails });
+        }
       }
 
       // Now validate

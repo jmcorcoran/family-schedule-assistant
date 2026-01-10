@@ -182,15 +182,8 @@ export default function App() {
         setApprovedSenders({ phones, emails });
       }
 
-      // Don't auto-mark setup as complete - let the user finish the wizard
-      // Only restore setupComplete state if it was explicitly saved
-      const savedConfig = localStorage.getItem('family-schedule-config');
-      if (savedConfig) {
-        const config = JSON.parse(savedConfig);
-        if (config.setupComplete) {
-          setSetupComplete(true);
-        }
-      }
+      // Set setupComplete based on database value for this account
+      setSetupComplete(account?.setup_complete || false);
 
     } catch (error) {
       console.error('Error loading from Supabase:', error);
@@ -424,9 +417,23 @@ export default function App() {
     }
   };
 
-  const completeSetup = () => {
+  const completeSetup = async () => {
     setSetupComplete(true);
-    // Always save to localStorage so setup state persists
+
+    // Save to database
+    if (supabase && accountId) {
+      try {
+        await supabase
+          .from('accounts')
+          .update({ setup_complete: true })
+          .eq('id', accountId);
+        console.log('Setup marked as complete in database');
+      } catch (error) {
+        console.error('Error marking setup as complete:', error);
+      }
+    }
+
+    // Also save to localStorage for demo mode
     const config = {
       familyMembers,
       confirmPref,

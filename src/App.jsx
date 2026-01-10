@@ -251,18 +251,29 @@ export default function App() {
   const addPhone = async () => {
     if (!newPhone.trim()) return;
 
+    console.log('Adding phone:', newPhone.trim());
+    console.log('accountId:', accountId);
+    console.log('supabase:', !!supabase);
+
     if (supabase && accountId) {
       try {
-        const { error } = await supabase
+        console.log('Inserting phone into database...');
+        const { data, error } = await supabase
           .from('approved_senders')
-          .insert([{ 
-            account_id: accountId, 
+          .insert([{
+            account_id: accountId,
             sender_type: 'phone',
-            sender_value: newPhone.trim() 
-          }]);
+            sender_value: newPhone.trim()
+          }])
+          .select();
 
-        if (error) throw error;
-        
+        if (error) {
+          console.error('Database error:', error);
+          throw error;
+        }
+
+        console.log('Phone added successfully:', data);
+
         setApprovedSenders({
           ...approvedSenders,
           phones: [...approvedSenders.phones, newPhone.trim()]
@@ -273,6 +284,7 @@ export default function App() {
         alert('Failed to add phone number. Please try again.');
       }
     } else {
+      console.warn('Falling back to localStorage (supabase or accountId missing)');
       setApprovedSenders({
         ...approvedSenders,
         phones: [...approvedSenders.phones, newPhone.trim()]
@@ -285,18 +297,29 @@ export default function App() {
   const addEmail = async () => {
     if (!newEmail.trim()) return;
 
+    console.log('Adding email:', newEmail.trim());
+    console.log('accountId:', accountId);
+    console.log('supabase:', !!supabase);
+
     if (supabase && accountId) {
       try {
-        const { error } = await supabase
+        console.log('Inserting email into database...');
+        const { data, error } = await supabase
           .from('approved_senders')
-          .insert([{ 
-            account_id: accountId, 
+          .insert([{
+            account_id: accountId,
             sender_type: 'email',
-            sender_value: newEmail.trim() 
-          }]);
+            sender_value: newEmail.trim()
+          }])
+          .select();
 
-        if (error) throw error;
-        
+        if (error) {
+          console.error('Database error:', error);
+          throw error;
+        }
+
+        console.log('Email added successfully:', data);
+
         setApprovedSenders({
           ...approvedSenders,
           emails: [...approvedSenders.emails, newEmail.trim()]
@@ -307,6 +330,7 @@ export default function App() {
         alert('Failed to add email address. Please try again.');
       }
     } else {
+      console.warn('Falling back to localStorage (supabase or accountId missing)');
       setApprovedSenders({
         ...approvedSenders,
         emails: [...approvedSenders.emails, newEmail.trim()]

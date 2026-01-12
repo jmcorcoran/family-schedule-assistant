@@ -1,9 +1,25 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Trash2, Check, Calendar, Mail, Phone, LogOut } from 'lucide-react';
+import { Plus, Trash2, Check, Calendar, Mail, Phone, LogOut, Globe } from 'lucide-react';
 import { supabase } from './lib/supabase';
 import Auth from './components/Auth';
 import OAuthCallback from './components/OAuthCallback';
 import { getGoogleAuthUrl } from './lib/googleCalendar';
+import { detectTimezone, US_TIMEZONES, getTimezoneLabel } from './lib/timezone';
+
+// Google Calendar color IDs
+const CALENDAR_COLORS = [
+  { id: '1', name: 'Lavender', color: '#a4bdfc' },
+  { id: '2', name: 'Sage', color: '#7ae7bf' },
+  { id: '3', name: 'Grape', color: '#dbadff' },
+  { id: '4', name: 'Flamingo', color: '#ff887c' },
+  { id: '5', name: 'Banana', color: '#fbd75b' },
+  { id: '6', name: 'Tangerine', color: '#ffb878' },
+  { id: '7', name: 'Peacock', color: '#46d6db' },
+  { id: '8', name: 'Graphite', color: '#e1e1e1' },
+  { id: '9', name: 'Blueberry', color: '#5484ed' },
+  { id: '10', name: 'Basil', color: '#51b749' },
+  { id: '11', name: 'Tomato', color: '#dc2127' },
+];
 
 export default function App() {
   const [session, setSession] = useState(null);
@@ -11,7 +27,10 @@ export default function App() {
   const [accountId, setAccountId] = useState(null);
   const [familyMembers, setFamilyMembers] = useState([]);
   const [newMember, setNewMember] = useState('');
+  const [newMemberColor, setNewMemberColor] = useState('9'); // Default blue
   const [confirmPref, setConfirmPref] = useState('clarification-only');
+  const [timezone, setTimezone] = useState('America/Chicago');
+  const [timezoneDetecting, setTimezoneDetecting] = useState(false);
   const [calendarConnected, setCalendarConnected] = useState(false);
   const [approvedSenders, setApprovedSenders] = useState({ phones: [], emails: [] });
   const [newPhone, setNewPhone] = useState('');
@@ -80,11 +99,19 @@ export default function App() {
       } else {
         // Create new account
         console.log('No account found, creating new account...');
+
+        // Detect timezone
+        console.log('Detecting timezone...');
+        const detectedTz = await detectTimezone();
+        console.log('Detected timezone:', detectedTz);
+        setTimezone(detectedTz);
+
         const { data, error } = await supabase
           .from('accounts')
           .insert([{
             user_id: session.user.id,
             confirmation_preference: 'clarification-only',
+            timezone: detectedTz,
             sms_number: '+1-555-' + Math.floor(Math.random() * 9000000 + 1000000),
             email_address: 'schedule-' + Math.random().toString(36).substring(7) + '@familyassist.app'
           }])
@@ -144,6 +171,7 @@ export default function App() {
         const config = JSON.parse(saved);
         setFamilyMembers(config.familyMembers || []);
         setConfirmPref(config.confirmPref || 'clarification-only');
+        setTimezone(config.timezone || 'America/Chicago');
         setCalendarConnected(config.calendarConnected || false);
         setApprovedSenders(config.approvedSenders || { phones: [], emails: [] });
         setSetupComplete(config.setupComplete || false);
@@ -164,6 +192,7 @@ export default function App() {
 
       if (account) {
         setConfirmPref(account.confirmation_preference);
+        setTimezone(account.timezone || 'America/Chicago');
         setCalendarConnected(!!account.google_calendar_id);
       }
 
@@ -174,7 +203,7 @@ export default function App() {
         .eq('account_id', accId);
 
       if (members) {
-        setFamilyMembers(members.map(m => ({ id: m.id, name: m.name })));
+        setFamilyMembers(members.map(m => ({ id: m.id, name: m.name, color: m.color })));
       }
 
       // Load approved senders
@@ -204,25 +233,28 @@ export default function App() {
       try {
         const { data, error } = await supabase
           .from('family_members')
-          .insert([{ 
-            account_id: accountId, 
-            name: newMember.trim() 
+          .insert([{
+            account_id: accountId,
+            name: newMember.trim(),
+            color: newMemberColor
           }])
           .select()
           .single();
 
         if (error) throw error;
-        
-        setFamilyMembers([...familyMembers, { id: data.id, name: data.name }]);
+
+        setFamilyMembers([...familyMembers, { id: data.id, name: data.name, color: data.color }]);
         setNewMember('');
+        setNewMemberColor('9'); // Reset to default blue
       } catch (error) {
         console.error('Error adding family member:', error);
         alert('Failed to add family member. Please try again.');
       }
     } else {
       // Fallback to localStorage
-      setFamilyMembers([...familyMembers, { id: Date.now(), name: newMember.trim() }]);
+      setFamilyMembers([...familyMembers, { id: Date.now(), name: newMember.trim(), color: newMemberColor }]);
       setNewMember('');
+      setNewMemberColor('9');
       saveToLocalStorage();
     }
   };
@@ -236,7 +268,7 @@ export default function App() {
           .eq('id', id);
 
         if (error) throw error;
-        
+
         setFamilyMembers(familyMembers.filter(m => m.id !== id));
       } catch (error) {
         console.error('Error removing family member:', error);
@@ -248,10 +280,43 @@ export default function App() {
     }
   };
 
+  const updateFamilyMemberColor = async (id, newColor) => {
+    if (supabase && accountId) {
+      try {
+        const { error } = await supabase
+          .from('family_members')
+          .update({ color: newColor })
+          .eq('id', id);
+
+        if (error) throw error;
+
+        setFamilyMembers(familyMembers.map(m =>
+          m.id === id ? { ...m, color: newColor } : m
+        ));
+      } catch (error) {
+        console.error('Error updating family member color:', error);
+        alert('Failed to update color. Please try again.');
+      }
+    } else {
+      setFamilyMembers(familyMembers.map(m =>
+        m.id === id ? { ...m, color: newColor } : m
+      ));
+      saveToLocalStorage();
+    }
+  };
+
   const addPhone = async () => {
     if (!newPhone.trim()) return;
 
-    console.log('Adding phone:', newPhone.trim());
+    // Normalize phone number - strip all non-numeric characters
+    let normalizedPhone = newPhone.trim().replace(/\D/g, '');
+
+    // Add country code if not present (assume US +1)
+    if (normalizedPhone.length === 10) {
+      normalizedPhone = '1' + normalizedPhone;
+    }
+
+    console.log('Adding phone:', newPhone.trim(), '-> normalized:', normalizedPhone);
     console.log('accountId:', accountId);
     console.log('supabase:', !!supabase);
 
@@ -263,7 +328,7 @@ export default function App() {
           .insert([{
             account_id: accountId,
             sender_type: 'phone',
-            sender_value: newPhone.trim()
+            sender_value: normalizedPhone
           }])
           .select();
 
@@ -276,7 +341,7 @@ export default function App() {
 
         setApprovedSenders({
           ...approvedSenders,
-          phones: [...approvedSenders.phones, newPhone.trim()]
+          phones: [...approvedSenders.phones, normalizedPhone]
         });
         setNewPhone('');
       } catch (error) {
@@ -287,7 +352,7 @@ export default function App() {
       console.warn('Falling back to localStorage (supabase or accountId missing)');
       setApprovedSenders({
         ...approvedSenders,
-        phones: [...approvedSenders.phones, newPhone.trim()]
+        phones: [...approvedSenders.phones, normalizedPhone]
       });
       setNewPhone('');
       saveToLocalStorage();
@@ -400,6 +465,7 @@ export default function App() {
     const config = {
       familyMembers,
       confirmPref,
+      timezone,
       calendarConnected,
       approvedSenders,
       setupComplete
@@ -409,7 +475,7 @@ export default function App() {
 
   const updateConfirmPref = async (pref) => {
     setConfirmPref(pref);
-    
+
     if (supabase && accountId) {
       try {
         await supabase
@@ -421,6 +487,35 @@ export default function App() {
       }
     } else {
       saveToLocalStorage();
+    }
+  };
+
+  const updateTimezone = async (tz) => {
+    setTimezone(tz);
+
+    if (supabase && accountId) {
+      try {
+        await supabase
+          .from('accounts')
+          .update({ timezone: tz })
+          .eq('id', accountId);
+      } catch (error) {
+        console.error('Error updating timezone:', error);
+      }
+    } else {
+      saveToLocalStorage();
+    }
+  };
+
+  const detectAndSetTimezone = async () => {
+    setTimezoneDetecting(true);
+    try {
+      const detectedTz = await detectTimezone();
+      await updateTimezone(detectedTz);
+    } catch (error) {
+      console.error('Error detecting timezone:', error);
+    } finally {
+      setTimezoneDetecting(false);
     }
   };
 
@@ -444,6 +539,7 @@ export default function App() {
     const config = {
       familyMembers,
       confirmPref,
+      timezone,
       calendarConnected,
       approvedSenders,
       setupComplete: true
@@ -618,23 +714,46 @@ export default function App() {
             <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-6">
               <h3 className="font-semibold text-lg mb-4 flex items-center">
                 <Phone className="w-5 h-5 mr-2 text-blue-600" />
-                Your Unique SMS Number
+                Text Your Calendar Assistant
               </h3>
               <div className="bg-white rounded-lg p-4 font-mono text-xl text-center">
-                +1 (555) 123-4567
+                +1 (414) 667-6770
               </div>
-              <p className="text-sm text-gray-600 mt-3">Text this number to add events to your calendar</p>
+              <p className="text-sm text-gray-600 mt-3">
+                Text this number from your approved phone number(s) to create calendar events
+              </p>
+              <div className="mt-4 bg-blue-100 rounded-lg p-3">
+                <p className="text-xs text-blue-800">
+                  <strong>Your approved phone numbers:</strong>
+                </p>
+                <ul className="text-xs text-blue-700 mt-1 space-y-1">
+                  {approvedSenders.phones.map(phone => (
+                    <li key={phone} className="font-mono">• {phone}</li>
+                  ))}
+                </ul>
+              </div>
             </div>
 
             <div className="bg-purple-50 border-2 border-purple-200 rounded-xl p-6">
               <h3 className="font-semibold text-lg mb-4 flex items-center">
                 <Mail className="w-5 h-5 mr-2 text-purple-600" />
-                Your Unique Email Address
+                Email Integration
               </h3>
-              <div className="bg-white rounded-lg p-4 font-mono text-lg text-center break-all">
-                schedule-abc123@familyassist.app
-              </div>
-              <p className="text-sm text-gray-600 mt-3">Forward emails to this address to add events</p>
+              <p className="text-sm text-gray-600">
+                Email integration coming soon! For now, use SMS to create calendar events.
+              </p>
+              {approvedSenders.emails.length > 0 && (
+                <div className="mt-4 bg-purple-100 rounded-lg p-3">
+                  <p className="text-xs text-purple-800">
+                    <strong>Your approved email addresses:</strong>
+                  </p>
+                  <ul className="text-xs text-purple-700 mt-1 space-y-1">
+                    {approvedSenders.emails.map(email => (
+                      <li key={email} className="font-mono">• {email}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
 
             <div className="bg-gray-50 rounded-xl p-6">
@@ -642,6 +761,7 @@ export default function App() {
               <div className="space-y-2 text-sm">
                 <p><span className="font-medium">Family Members:</span> {familyMembers.map(m => m.name).join(', ')}</p>
                 <p><span className="font-medium">Confirmations:</span> {confirmPref === 'always' ? 'Always' : confirmPref === 'never' ? 'Never' : 'Only when clarification needed'}</p>
+                <p><span className="font-medium">Timezone:</span> {getTimezoneLabel(timezone)}</p>
                 <p><span className="font-medium">Approved Senders:</span> {approvedSenders.phones.length} phone(s), {approvedSenders.emails.length} email(s)</p>
               </div>
             </div>
@@ -694,14 +814,15 @@ export default function App() {
         <div className="mb-8">
           <div className="flex justify-between mb-2">
             {[1, 2, 3, 4, 5].map(num => (
-              <div
+              <button
                 key={num}
-                className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold ${
-                  num <= step ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-500'
+                onClick={() => setStep(num)}
+                className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold transition-all hover:scale-110 ${
+                  num <= step ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-gray-200 text-gray-500 hover:bg-gray-300'
                 }`}
               >
                 {num}
-              </div>
+              </button>
             ))}
           </div>
           <div className="h-2 bg-gray-200 rounded-full">
@@ -729,6 +850,21 @@ export default function App() {
                 placeholder="Enter a name"
                 className="flex-1 px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
               />
+
+              {/* Color Dropdown */}
+              <select
+                value={newMemberColor}
+                onChange={(e) => setNewMemberColor(e.target.value)}
+                className="px-3 py-2 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
+                style={{ minWidth: '120px' }}
+              >
+                {CALENDAR_COLORS.map((colorOption) => (
+                  <option key={colorOption.id} value={colorOption.id}>
+                    {colorOption.name}
+                  </option>
+                ))}
+              </select>
+
               <button
                 onClick={addFamilyMember}
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition flex items-center gap-2"
@@ -739,20 +875,43 @@ export default function App() {
             </div>
 
             <div className="space-y-2">
-              {familyMembers.map(member => (
-                <div
-                  key={member.id}
-                  className="flex items-center justify-between bg-gray-50 px-4 py-3 rounded-lg"
-                >
-                  <span className="font-medium">{member.name}</span>
-                  <button
-                    onClick={() => removeFamilyMember(member.id)}
-                    className="text-red-500 hover:text-red-700"
+              {familyMembers.map(member => {
+                const memberColor = CALENDAR_COLORS.find(c => c.id === member.color);
+                return (
+                  <div
+                    key={member.id}
+                    className="flex items-center justify-between bg-gray-50 px-4 py-3 rounded-lg"
                   >
-                    <Trash2 className="w-5 h-5" />
-                  </button>
-                </div>
-              ))}
+                    <div className="flex items-center gap-3">
+                      <div
+                        className="w-6 h-6 rounded-full flex-shrink-0"
+                        style={{ backgroundColor: memberColor?.color || '#5484ed' }}
+                        title={memberColor?.name || 'Blueberry'}
+                      />
+                      <span className="font-medium">{member.name}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={member.color || '9'}
+                        onChange={(e) => updateFamilyMemberColor(member.id, e.target.value)}
+                        className="px-2 py-1 text-sm border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
+                      >
+                        {CALENDAR_COLORS.map((colorOption) => (
+                          <option key={colorOption.id} value={colorOption.id}>
+                            {colorOption.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        onClick={() => removeFamilyMember(member.id)}
+                        className="text-red-500 hover:text-red-700"
+                      >
+                        <Trash2 className="w-5 h-5" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
               {familyMembers.length === 0 && (
                 <p className="text-gray-400 text-center py-8">No family members added yet</p>
               )}
@@ -794,6 +953,42 @@ export default function App() {
                   <p className="text-sm text-gray-600 ml-6">{option.desc}</p>
                 </label>
               ))}
+            </div>
+
+            <div className="border-t-2 border-gray-200 pt-6">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h2 className="text-2xl font-bold mb-2 flex items-center gap-2">
+                    <Globe className="w-6 h-6 text-blue-600" />
+                    Timezone
+                  </h2>
+                  <p className="text-gray-600">Ensure events are scheduled at the correct time</p>
+                </div>
+                <button
+                  onClick={detectAndSetTimezone}
+                  disabled={timezoneDetecting}
+                  className="px-4 py-2 bg-blue-50 text-blue-600 rounded-lg text-sm font-medium hover:bg-blue-100 transition disabled:opacity-50"
+                >
+                  {timezoneDetecting ? 'Detecting...' : 'Auto-detect'}
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                <select
+                  value={timezone}
+                  onChange={(e) => updateTimezone(e.target.value)}
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
+                >
+                  {US_TIMEZONES.map((tz) => (
+                    <option key={tz.value} value={tz.value}>
+                      {tz.label} ({tz.offset})
+                    </option>
+                  ))}
+                </select>
+                <p className="text-sm text-gray-500">
+                  Current selection: {getTimezoneLabel(timezone)}
+                </p>
+              </div>
             </div>
           </div>
         )}
@@ -938,6 +1133,10 @@ export default function App() {
                    confirmPref === 'never' ? 'Never confirm, add automatically' :
                    'Only confirm when clarification is needed'}
                 </p>
+              </div>
+              <div>
+                <h3 className="font-semibold mb-2">Timezone</h3>
+                <p className="text-gray-700">{getTimezoneLabel(timezone)}</p>
               </div>
               <div>
                 <h3 className="font-semibold mb-2">Calendar</h3>

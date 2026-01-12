@@ -282,13 +282,77 @@ Deno.serve(async (req) => {
       }
 
       // New conversation - parse the message using Claude to create an event
-      eventDetails = await parseMessageWithClaude(
+      const parseResult = await parseMessageWithClaude(
         message,
         account.family_members.map((m: any) => m.name),
         account.confirmation_preference,
         account.timezone || "America/Chicago"
       );
 
+      console.log("Parsed result:", parseResult);
+
+      // Handle multi-event messages
+      if (parseResult.events && parseResult.events.length > 1) {
+        // Multiple events detected - process them all
+        const createdEvents = [];
+        for (const event of parseResult.events) {
+          try {
+            // Get event color
+            let eventColor = null;
+            if (event.familyMembers && event.familyMembers.length > 0) {
+              const primaryMember = event.familyMembers[0];
+              const memberData = account.family_members.find(
+                (m: any) => m.name.toLowerCase() === primaryMember.toLowerCase()
+              );
+              if (memberData && memberData.color) {
+                eventColor = memberData.color;
+              }
+            }
+
+            // Create event (skip conflict detection for multi-event messages)
+            const calendarEventId = await addToGoogleCalendar(
+              account.google_access_token,
+              account.google_refresh_token,
+              event,
+              account.timezone || "America/Chicago",
+              eventColor
+            );
+
+            // Create reminder
+            if (event.time && event.date) {
+              try {
+                const eventStartTime = new Date(`${event.date}T${event.time}:00`);
+                const reminderTime = new Date(eventStartTime.getTime() - 60 * 60 * 1000);
+                if (reminderTime > new Date()) {
+                  await supabase.from("event_reminders").insert([{
+                    account_id: accountId,
+                    google_event_id: calendarEventId,
+                    reminder_time: reminderTime.toISOString(),
+                    recipient_phone: normalizedSender,
+                  }]);
+                }
+              } catch (reminderError) {
+                console.error("Failed to create reminder:", reminderError);
+              }
+            }
+
+            createdEvents.push(event.title);
+          } catch (error) {
+            console.error(`Failed to create event "${event.title}":`, error);
+          }
+        }
+
+        return new Response(
+          JSON.stringify({
+            status: "success",
+            message: `Created ${createdEvents.length} events: ${createdEvents.join(", ")}`,
+          }),
+          { headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      // Single event - extract it and continue with normal flow
+      eventDetails = parseResult.events[0];
       console.log("Parsed event:", eventDetails);
 
       // Check for unknown family members FIRST (before other clarifications)
@@ -525,19 +589,37 @@ IMPORTANT CLARIFICATION RULES (check in this order, only ask ONE question):
 
 IMPORTANT: If the message includes duration information (like "for 1 hour", "30 minutes", "1.5 hours"), make sure to extract it to the duration field so we don't ask for it again.
 
+SMART TEMPLATES - Apply intelligent defaults based on event type:
+- "doctor appointment" / "dentist" / "medical" -> default duration "1 hour" if not specified
+- "soccer practice" / "basketball practice" / "sports practice" -> default duration "1.5 hours" if not specified
+- "meeting" / "conference call" -> default duration "1 hour" if not specified
+- "birthday party" / "party" -> default duration "2 hours" if not specified
+- "lunch" / "dinner" / "breakfast" -> default duration "1 hour" if not specified
+- "piano lesson" / "guitar lesson" / "music lesson" -> default duration "30 minutes" if not specified
+
+MULTI-EVENT DETECTION:
+If the message describes multiple distinct events (e.g., "Justin has practice Monday and Wednesday" or "Add dentist on Tuesday and meeting on Friday"), extract each as a separate event in the events array.
+- "Justin has practice Monday and Wednesday at 5pm" -> 2 events (one Monday, one Wednesday)
+- "Add soccer practice at 5pm and piano lesson at 6pm tomorrow" -> 2 events
+For single events, still return an array with one event.
+
 Respond ONLY with a JSON object in this exact format:
 {
-  "title": "event title",
-  "date": "YYYY-MM-DD",
-  "time": "HH:MM" or null,
-  "duration": "duration string" or null,
-  "location": "location string" or null,
-  "familyMembers": ["name1", "name2"],
-  "recurring": true or false,
-  "recurrenceRule": "RRULE:FREQ=..." or null,
-  "recurrenceEndDate": "YYYY-MM-DD" or null,
-  "needsClarification": false,
-  "clarificationQuestion": null
+  "events": [
+    {
+      "title": "event title",
+      "date": "YYYY-MM-DD",
+      "time": "HH:MM" or null,
+      "duration": "duration string" or null,
+      "location": "location string" or null,
+      "familyMembers": ["name1", "name2"],
+      "recurring": true or false,
+      "recurrenceRule": "RRULE:FREQ=..." or null,
+      "recurrenceEndDate": "YYYY-MM-DD" or null,
+      "needsClarification": false,
+      "clarificationQuestion": null
+    }
+  ]
 }`;
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {

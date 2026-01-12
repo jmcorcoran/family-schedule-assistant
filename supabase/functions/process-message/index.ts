@@ -10,6 +10,7 @@ interface EventDetails {
   date: string;
   time?: string;
   duration?: string;
+  location?: string;
   familyMembers: string[];
   needsClarification?: boolean;
   clarificationQuestion?: string;
@@ -156,6 +157,79 @@ Deno.serve(async (req) => {
             { headers: { "Content-Type": "application/json" } }
           );
         }
+      } else if (conversationState.awaiting_field === "conflict_confirmation") {
+        // User is responding to conflict warning
+        const response = message.toLowerCase().trim();
+
+        if (response.includes("add anyway") || response.includes("proceed") || response.includes("yes")) {
+          // User wants to proceed despite conflict - skip conflict check and add event
+          await supabase
+            .from("conversation_state")
+            .delete()
+            .eq("id", conversationState.id);
+
+          // Get event color
+          let eventColor = null;
+          if (eventDetails.familyMembers && eventDetails.familyMembers.length > 0) {
+            const primaryMember = eventDetails.familyMembers[0];
+            const memberData = account.family_members.find(
+              (m: any) => m.name.toLowerCase() === primaryMember.toLowerCase()
+            );
+            if (memberData && memberData.color) {
+              eventColor = memberData.color;
+            }
+          }
+
+          // Add event to calendar (bypassing conflict check)
+          const calendarEventId = await addToGoogleCalendar(
+            account.google_access_token,
+            account.google_refresh_token,
+            eventDetails,
+            account.timezone || "America/Chicago",
+            eventColor
+          );
+
+          // Create reminder
+          if (eventDetails.time && eventDetails.date) {
+            try {
+              const eventStartTime = new Date(`${eventDetails.date}T${eventDetails.time}:00`);
+              const reminderTime = new Date(eventStartTime.getTime() - 60 * 60 * 1000);
+              if (reminderTime > new Date()) {
+                await supabase.from("event_reminders").insert([{
+                  account_id: accountId,
+                  google_event_id: calendarEventId,
+                  reminder_time: reminderTime.toISOString(),
+                  recipient_phone: normalizedSender,
+                }]);
+              }
+            } catch (reminderError) {
+              console.error("Failed to create reminder:", reminderError);
+            }
+          }
+
+          return new Response(
+            JSON.stringify({
+              status: "success",
+              message: `Event "${eventDetails.title}" added to calendar for ${eventDetails.familyMembers.join(", ")}`,
+              eventId: calendarEventId,
+            }),
+            { headers: { "Content-Type": "application/json" } }
+          );
+        } else {
+          // User wants to cancel
+          await supabase
+            .from("conversation_state")
+            .delete()
+            .eq("id", conversationState.id);
+
+          return new Response(
+            JSON.stringify({
+              status: "cancelled",
+              message: "No problem! Event was not created.",
+            }),
+            { headers: { "Content-Type": "application/json" } }
+          );
+        }
       }
 
       // Delete the conversation state
@@ -298,6 +372,47 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Check for conflicts before adding the event
+    if (eventDetails.time && eventDetails.date) {
+      const conflicts = await checkForConflicts(
+        account.google_access_token,
+        account.google_refresh_token,
+        eventDetails,
+        account.timezone || "America/Chicago"
+      );
+
+      if (conflicts.length > 0) {
+        const conflictList = conflicts.map((event: any) => {
+          const start = new Date(event.start.dateTime || event.start.date);
+          const timeStr = event.start.dateTime
+            ? start.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: account.timezone || "America/Chicago" })
+            : "All day";
+          return `"${event.summary}" at ${timeStr}`;
+        }).join(", ");
+
+        // Save event details to conversation state for potential override
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+        await supabase
+          .from("conversation_state")
+          .upsert({
+            account_id: accountId,
+            sender_value: normalizedSender,
+            sender_type: senderType,
+            partial_event: eventDetails,
+            awaiting_field: "conflict_confirmation",
+            expires_at: expiresAt.toISOString(),
+          });
+
+        return new Response(
+          JSON.stringify({
+            status: "conflict",
+            message: `Warning: This event conflicts with: ${conflictList}. Reply "add anyway" to proceed or "cancel" to cancel.`,
+          }),
+          { headers: { "Content-Type": "application/json" } }
+        );
+      }
+    }
+
     // Add event to Google Calendar
     const calendarEventId = await addToGoogleCalendar(
       account.google_access_token,
@@ -308,6 +423,29 @@ Deno.serve(async (req) => {
     );
 
     console.log("Event added to calendar:", calendarEventId);
+
+    // Create reminder for the event (1 hour before)
+    if (eventDetails.time && eventDetails.date) {
+      try {
+        // Calculate reminder time (1 hour before event start)
+        const eventStartTime = new Date(`${eventDetails.date}T${eventDetails.time}:00`);
+        const reminderTime = new Date(eventStartTime.getTime() - 60 * 60 * 1000); // 1 hour before
+
+        // Only create reminder if it's in the future
+        if (reminderTime > new Date()) {
+          await supabase.from("event_reminders").insert([{
+            account_id: accountId,
+            google_event_id: calendarEventId,
+            reminder_time: reminderTime.toISOString(),
+            recipient_phone: normalizedSender,
+          }]);
+          console.log(`Reminder scheduled for ${reminderTime.toISOString()}`);
+        }
+      } catch (reminderError) {
+        console.error("Failed to create reminder:", reminderError);
+        // Don't fail the whole operation if reminder creation fails
+      }
+    }
 
     // Return success response
     return new Response(
@@ -362,9 +500,10 @@ Extract:
    - "1.5 hours" → "1.5 hours"
    - "90 minutes" → "90 minutes"
    - If duration is clearly stated, extract it
-5. Which family members this event is for (match names from the family members list)
-6. Recurring pattern (detect phrases like "every Monday", "every week", "daily", "every Saturday", etc.)
-7. End date for recurring events (if mentioned, e.g., "until December", "for 6 weeks")
+5. Location (if mentioned, e.g., "at the park", "at 123 Main St", "at school", "at home")
+6. Which family members this event is for (match names from the family members list)
+7. Recurring pattern (detect phrases like "every Monday", "every week", "daily", "every Saturday", etc.)
+8. End date for recurring events (if mentioned, e.g., "until December", "for 6 weeks")
 
 For recurring events, generate a recurrenceRule in Google Calendar RRULE format:
 - "every day" or "daily" -> "RRULE:FREQ=DAILY"
@@ -392,6 +531,7 @@ Respond ONLY with a JSON object in this exact format:
   "date": "YYYY-MM-DD",
   "time": "HH:MM" or null,
   "duration": "duration string" or null,
+  "location": "location string" or null,
   "familyMembers": ["name1", "name2"],
   "recurring": true or false,
   "recurrenceRule": "RRULE:FREQ=..." or null,
@@ -491,6 +631,12 @@ async function addToGoogleCalendar(
   if (colorId) {
     event.colorId = colorId;
     console.log(`Applying color ${colorId} to event`);
+  }
+
+  // Add location if specified
+  if (eventDetails.location) {
+    event.location = eventDetails.location;
+    console.log(`Adding location: ${eventDetails.location}`);
   }
 
   // Handle date and time
@@ -1107,4 +1253,73 @@ async function identifyEventToManage(
   } catch (e) {
     return null;
   }
+}
+
+// Check for conflicting events
+async function checkForConflicts(
+  accessToken: string,
+  refreshToken: string,
+  eventDetails: EventDetails,
+  timezone: string
+): Promise<any[]> {
+  // Calculate start and end time for the proposed event
+  const startDateTime = `${eventDetails.date}T${eventDetails.time}:00`;
+  const startDate = new Date(startDateTime);
+
+  // Calculate duration
+  let durationMinutes = 60; // Default 1 hour
+  if (eventDetails.duration) {
+    const duration = eventDetails.duration.toLowerCase();
+    if (duration.includes('hour')) {
+      const hours = parseFloat(duration.match(/[\d.]+/)?.[0] || '1');
+      durationMinutes = hours * 60;
+    } else if (duration.includes('minute') || duration.includes('min')) {
+      durationMinutes = parseInt(duration.match(/\d+/)?.[0] || '60');
+    }
+  }
+
+  const endDate = new Date(startDate.getTime() + durationMinutes * 60 * 1000);
+
+  // Query Google Calendar for events in this time range
+  let response = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/primary/events?` +
+    `timeMin=${encodeURIComponent(startDate.toISOString())}&` +
+    `timeMax=${encodeURIComponent(endDate.toISOString())}&` +
+    `singleEvents=true`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  // Refresh token if needed
+  if (response.status === 401) {
+    const newAccessToken = await refreshGoogleToken(refreshToken);
+    const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
+    await supabase
+      .from("accounts")
+      .update({ google_access_token: newAccessToken })
+      .eq("google_refresh_token", refreshToken);
+
+    response = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/primary/events?` +
+      `timeMin=${encodeURIComponent(startDate.toISOString())}&` +
+      `timeMax=${encodeURIComponent(endDate.toISOString())}&` +
+      `singleEvents=true`,
+      {
+        headers: {
+          Authorization: `Bearer ${newAccessToken}`,
+        },
+      }
+    );
+  }
+
+  if (!response.ok) {
+    console.error("Error checking for conflicts");
+    return []; // Return empty array on error to allow event creation
+  }
+
+  const data = await response.json();
+  return data.items || [];
 }

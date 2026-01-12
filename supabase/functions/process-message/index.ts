@@ -935,6 +935,16 @@ function detectManagementAction(message: string): { type: string; data?: any } |
     return { type: "view" };
   }
 
+  // Add note to event
+  if (
+    lowerMessage.includes("add note") ||
+    lowerMessage.includes("add a note") ||
+    lowerMessage.match(/note.*:/i) ||
+    lowerMessage.includes("remind me to") && lowerMessage.includes("for")
+  ) {
+    return { type: "add_note" };
+  }
+
   // Skip single instance of recurring event
   if (
     lowerMessage.includes("skip") ||
@@ -1101,6 +1111,36 @@ async function handleManagementAction(
     return {
       status: "success",
       message: `Skipped: ${eventToSkip.summary} on ${dateStr}`,
+    };
+  }
+
+  if (action.type === "add_note") {
+    // Use Claude to identify event and extract note
+    const noteDetails = await identifyEventAndNote(
+      message,
+      account.google_access_token,
+      account.google_refresh_token,
+      timezone
+    );
+
+    if (!noteDetails || !noteDetails.event) {
+      return {
+        status: "error",
+        message: "I couldn't find that event. Try: 'What's on my calendar?' to see upcoming events.",
+      };
+    }
+
+    // Add the note to the event description
+    await addNoteToEvent(
+      account.google_access_token,
+      account.google_refresh_token,
+      noteDetails.event.id,
+      noteDetails.note
+    );
+
+    return {
+      status: "success",
+      message: `Added note to ${noteDetails.event.summary}: "${noteDetails.note}"`,
     };
   }
 
@@ -1446,4 +1486,133 @@ async function checkForConflicts(
 
   const data = await response.json();
   return data.items || [];
+}
+
+// Use Claude to identify event and extract note text
+async function identifyEventAndNote(
+  message: string,
+  accessToken: string,
+  refreshToken: string,
+  timezone: string
+): Promise<any> {
+  // Get upcoming events
+  const events = await queryGoogleCalendar(accessToken, refreshToken, timezone, "next 14 days");
+
+  if (!events || events.length === 0) {
+    return null;
+  }
+
+  // Format events for Claude
+  const eventList = events.map((event: any, index: number) => {
+    const start = event.start.dateTime || event.start.date;
+    const date = new Date(start);
+    return `${index + 1}. "${event.summary}" on ${date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: timezone })}`;
+  }).join("\n");
+
+  const prompt = `User said: "${message}"\n\nUpcoming events:\n${eventList}\n\nWhich event is the user referring to? What note do they want to add? Respond with JSON: {"eventIndex": number, "note": "the note text"}`;
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": ANTHROPIC_API_KEY!,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-3-haiku-20240307",
+      max_tokens: 200,
+      messages: [{
+        role: "user",
+        content: prompt,
+      }],
+    }),
+  });
+
+  if (!response.ok) {
+    return null;
+  }
+
+  const result = await response.json();
+  const content = result.content[0].text;
+
+  try {
+    const parsed = JSON.parse(content);
+    return {
+      event: events[parsed.eventIndex - 1],
+      note: parsed.note,
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+// Add a note to an event's description
+async function addNoteToEvent(
+  accessToken: string,
+  refreshToken: string,
+  eventId: string,
+  note: string
+): Promise<void> {
+  // First, get the existing event
+  let response = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/primary/events/${eventId}`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  if (response.status === 401) {
+    const newAccessToken = await refreshGoogleToken(refreshToken);
+    const supabase = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
+    await supabase
+      .from("accounts")
+      .update({ google_access_token: newAccessToken })
+      .eq("google_refresh_token", refreshToken);
+
+    response = await fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/primary/events/${eventId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${newAccessToken}`,
+        },
+      }
+    );
+    accessToken = newAccessToken;
+  }
+
+  if (!response.ok) {
+    throw new Error("Failed to fetch event for note update");
+  }
+
+  const event = await response.json();
+
+  // Append the note to the description
+  const existingDescription = event.description || "";
+  const separator = existingDescription ? "\n\n" : "";
+  const timestamp = new Date().toLocaleString("en-US", {
+    dateStyle: "short",
+    timeStyle: "short"
+  });
+
+  event.description = `${existingDescription}${separator}📝 Note (${timestamp}): ${note}`;
+
+  // Update the event
+  response = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/primary/events/${eventId}`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(event),
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to add note: ${error}`);
+  }
 }

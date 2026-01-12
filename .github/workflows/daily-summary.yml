@@ -1,0 +1,30 @@
+name: Send Daily Summary
+
+on:
+  schedule:
+    # Run every day at 7:00 AM Central Time (12:00 PM UTC)
+    - cron: '0 12 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  send-daily-summary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send daily event summary
+        run: |
+          response=$(curl -s -w "\n%{http_code}" -X POST \
+            "${{ secrets.VITE_SUPABASE_URL }}/functions/v1/send-summaries" \
+            -H "Authorization: Bearer ${{ secrets.VITE_SUPABASE_ANON_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"type": "daily"}')
+
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | head -n-1)
+
+          echo "Response: $body"
+          echo "HTTP Status: $http_code"
+
+          if [ "$http_code" -ge 400 ]; then
+            echo "Error: Request failed with status $http_code"
+            exit 1
+          fi

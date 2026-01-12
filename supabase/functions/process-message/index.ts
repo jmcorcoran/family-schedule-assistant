@@ -935,6 +935,15 @@ function detectManagementAction(message: string): { type: string; data?: any } |
     return { type: "view" };
   }
 
+  // Skip single instance of recurring event
+  if (
+    lowerMessage.includes("skip") ||
+    (lowerMessage.includes("cancel") && (lowerMessage.includes("this week") || lowerMessage.includes("next") || lowerMessage.includes("tomorrow"))) ||
+    lowerMessage.match(/cancel.*(monday|tuesday|wednesday|thursday|friday|saturday|sunday)/)
+  ) {
+    return { type: "skip" };
+  }
+
   // Cancel/delete event
   if (
     lowerMessage.includes("cancel") ||
@@ -1059,6 +1068,39 @@ async function handleManagementAction(
     return {
       status: "success",
       message: `Moved: ${moveDetails.event.summary} to ${moveDetails.newTime}`,
+    };
+  }
+
+  if (action.type === "skip") {
+    // Use Claude to identify which specific instance to skip
+    const eventToSkip = await identifyEventToManage(
+      message,
+      account.google_access_token,
+      account.google_refresh_token,
+      timezone,
+      "skip"
+    );
+
+    if (!eventToSkip) {
+      return {
+        status: "error",
+        message: "I couldn't find that event. Try: 'What's on my calendar?' to see upcoming events.",
+      };
+    }
+
+    // Delete just this instance (works for both recurring and non-recurring)
+    await deleteGoogleCalendarEvent(
+      account.google_access_token,
+      account.google_refresh_token,
+      eventToSkip.id
+    );
+
+    const start = new Date(eventToSkip.start.dateTime || eventToSkip.start.date);
+    const dateStr = start.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: timezone });
+
+    return {
+      status: "success",
+      message: `Skipped: ${eventToSkip.summary} on ${dateStr}`,
     };
   }
 

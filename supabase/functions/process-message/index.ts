@@ -56,22 +56,25 @@ Deno.serve(async (req) => {
 
     console.log(`Normalized sender: ${sender} -> ${normalizedSender}`);
 
-    const { data: approvedSenders } = await supabase
-      .from("approved_senders")
-      .select("account_id")
-      .eq("sender_type", senderType)
-      .eq("sender_value", normalizedSender);
+    // Find family member by phone or email to validate sender
+    const senderColumn = senderType === "phone" ? "phone" : "email";
+    const { data: senderFamilyMember } = await supabase
+      .from("family_members")
+      .select("account_id, name")
+      .eq(senderColumn, normalizedSender)
+      .maybeSingle();
 
-    if (!approvedSenders || approvedSenders.length === 0) {
-      console.log("Sender not approved:", sender);
+    if (!senderFamilyMember) {
+      console.log("Sender not approved (no matching family member):", sender);
       return new Response(
         JSON.stringify({ error: "Sender not authorized" }),
         { status: 403, headers: { "Content-Type": "application/json" } }
       );
     }
 
-    const accountId = approvedSenders[0].account_id;
-    console.log("Found account:", accountId);
+    const accountId = senderFamilyMember.account_id;
+    const senderName = senderFamilyMember.name;
+    console.log(`Found account: ${accountId}, sender is: ${senderName}`);
 
     // Get account details including family members
     const { data: account } = await supabase
@@ -157,79 +160,6 @@ Deno.serve(async (req) => {
             { headers: { "Content-Type": "application/json" } }
           );
         }
-      } else if (conversationState.awaiting_field === "conflict_confirmation") {
-        // User is responding to conflict warning
-        const response = message.toLowerCase().trim();
-
-        if (response.includes("add anyway") || response.includes("proceed") || response.includes("yes")) {
-          // User wants to proceed despite conflict - skip conflict check and add event
-          await supabase
-            .from("conversation_state")
-            .delete()
-            .eq("id", conversationState.id);
-
-          // Get event color
-          let eventColor = null;
-          if (eventDetails.familyMembers && eventDetails.familyMembers.length > 0) {
-            const primaryMember = eventDetails.familyMembers[0];
-            const memberData = account.family_members.find(
-              (m: any) => m.name.toLowerCase() === primaryMember.toLowerCase()
-            );
-            if (memberData && memberData.color) {
-              eventColor = memberData.color;
-            }
-          }
-
-          // Add event to calendar (bypassing conflict check)
-          const calendarEventId = await addToGoogleCalendar(
-            account.google_access_token,
-            account.google_refresh_token,
-            eventDetails,
-            account.timezone || "America/Chicago",
-            eventColor
-          );
-
-          // Create reminder
-          if (eventDetails.time && eventDetails.date) {
-            try {
-              const eventStartTime = new Date(`${eventDetails.date}T${eventDetails.time}:00`);
-              const reminderTime = new Date(eventStartTime.getTime() - 60 * 60 * 1000);
-              if (reminderTime > new Date()) {
-                await supabase.from("event_reminders").insert([{
-                  account_id: accountId,
-                  google_event_id: calendarEventId,
-                  reminder_time: reminderTime.toISOString(),
-                  recipient_phone: normalizedSender,
-                }]);
-              }
-            } catch (reminderError) {
-              console.error("Failed to create reminder:", reminderError);
-            }
-          }
-
-          return new Response(
-            JSON.stringify({
-              status: "success",
-              message: `Event "${eventDetails.title}" added to calendar for ${eventDetails.familyMembers.join(", ")}`,
-              eventId: calendarEventId,
-            }),
-            { headers: { "Content-Type": "application/json" } }
-          );
-        } else {
-          // User wants to cancel
-          await supabase
-            .from("conversation_state")
-            .delete()
-            .eq("id", conversationState.id);
-
-          return new Response(
-            JSON.stringify({
-              status: "cancelled",
-              message: "No problem! Event was not created.",
-            }),
-            { headers: { "Content-Type": "application/json" } }
-          );
-        }
       }
 
       // Delete the conversation state
@@ -297,6 +227,9 @@ Deno.serve(async (req) => {
         const createdEvents = [];
         for (const event of parseResult.events) {
           try {
+            // Apply smart default duration if not specified
+            applyDefaultDuration(event);
+
             // Get event color
             let eventColor = null;
             if (event.familyMembers && event.familyMembers.length > 0) {
@@ -354,6 +287,16 @@ Deno.serve(async (req) => {
       // Single event - extract it and continue with normal flow
       eventDetails = parseResult.events[0];
       console.log("Parsed event:", eventDetails);
+
+      // Apply smart default duration if not specified
+      applyDefaultDuration(eventDetails);
+
+      // Clear duration-related clarification if we now have a duration
+      if (eventDetails.duration && eventDetails.needsClarification &&
+          eventDetails.clarificationQuestion?.toLowerCase().includes("block")) {
+        eventDetails.needsClarification = false;
+        eventDetails.clarificationQuestion = undefined;
+      }
 
       // Check for unknown family members FIRST (before other clarifications)
       if (eventDetails.familyMembers && eventDetails.familyMembers.length > 0) {
@@ -436,7 +379,8 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Check for conflicts before adding the event
+    // Check for conflicts (but add the event anyway)
+    let conflictWarning = null;
     if (eventDetails.time && eventDetails.date) {
       const conflicts = await checkForConflicts(
         account.google_access_token,
@@ -454,26 +398,7 @@ Deno.serve(async (req) => {
           return `"${event.summary}" at ${timeStr}`;
         }).join(", ");
 
-        // Save event details to conversation state for potential override
-        const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-        await supabase
-          .from("conversation_state")
-          .upsert({
-            account_id: accountId,
-            sender_value: normalizedSender,
-            sender_type: senderType,
-            partial_event: eventDetails,
-            awaiting_field: "conflict_confirmation",
-            expires_at: expiresAt.toISOString(),
-          });
-
-        return new Response(
-          JSON.stringify({
-            status: "conflict",
-            message: `Warning: This event conflicts with: ${conflictList}. Reply "add anyway" to proceed or "cancel" to cancel.`,
-          }),
-          { headers: { "Content-Type": "application/json" } }
-        );
+        conflictWarning = `⚠️ Scheduling conflict: This overlaps with ${conflictList}`;
       }
     }
 
@@ -515,7 +440,7 @@ Deno.serve(async (req) => {
     return new Response(
       JSON.stringify({
         status: "success",
-        message: `Event "${eventDetails.title}" added to calendar for ${eventDetails.familyMembers.join(", ")}`,
+        message: `Event "${eventDetails.title}" added to calendar for ${eventDetails.familyMembers.join(", ")}${conflictWarning ? "\n\n" + conflictWarning : ""}`,
         eventId: calendarEventId,
       }),
       { headers: { "Content-Type": "application/json" } }
@@ -898,6 +823,67 @@ async function extractDate(message: string, timezone: string): Promise<string | 
   }
 
   return null;
+}
+
+// Apply smart default durations based on event type
+function applyDefaultDuration(event: EventDetails): void {
+  // Only apply default if no duration was specified
+  if (event.duration) {
+    return;
+  }
+
+  const title = event.title.toLowerCase();
+
+  // Doctor/Dentist/Medical appointments: 1 hour
+  if (title.includes("doctor") || title.includes("dentist") ||
+      title.includes("appointment") || title.includes("checkup") ||
+      title.includes("physical") || title.includes("medical")) {
+    event.duration = "1 hour";
+    return;
+  }
+
+  // Sports practice: 1.5 hours
+  if (title.includes("practice") || title.includes("training") ||
+      title.includes("workout")) {
+    event.duration = "1.5 hours";
+    return;
+  }
+
+  // Classes/Lessons: 1 hour
+  if (title.includes("class") || title.includes("lesson") ||
+      title.includes("tutoring")) {
+    event.duration = "1 hour";
+    return;
+  }
+
+  // Games/Matches: 2 hours
+  if (title.includes("game") || title.includes("match") ||
+      title.includes("tournament") || title.includes("competition")) {
+    event.duration = "2 hours";
+    return;
+  }
+
+  // Quick/Brief meetings: 30 minutes
+  if (title.includes("quick") || title.includes("brief") ||
+      title.includes("standup") || title.includes("check-in")) {
+    event.duration = "30 minutes";
+    return;
+  }
+
+  // School/Work: 8 hours (if no specific time, likely all-day)
+  if (title.includes("school") || title.includes("work")) {
+    event.duration = "8 hours";
+    return;
+  }
+
+  // Birthday parties: 2 hours
+  if (title.includes("birthday") || title.includes("party")) {
+    event.duration = "2 hours";
+    return;
+  }
+
+  // Default for meetings and generic events: 1 hour
+  event.duration = "1 hour";
 }
 
 // Helper function to check what clarifications are still needed

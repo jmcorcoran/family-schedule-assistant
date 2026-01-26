@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Mail, Lock } from 'lucide-react';
+import { Mail } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
 export default function Auth() {
@@ -78,23 +78,60 @@ export default function Auth() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-6">
-      <div className="max-w-md w-full bg-white rounded-2xl shadow-xl p-8">
-        <div className="text-center mb-8">
-          <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
-            <Mail className="w-8 h-8 text-blue-600" />
+    <div
+      className="min-h-screen flex items-center justify-center p-6"
+      style={{ background: 'var(--canvas)' }}
+    >
+      <div
+        className="w-full max-w-md surface-raised"
+        style={{ padding: 'var(--space-8)' }}
+      >
+        {/* Header */}
+        <div className="text-center" style={{ marginBottom: 'var(--space-8)' }}>
+          <div
+            className="icon-circle icon-circle-lg mx-auto"
+            style={{
+              background: 'var(--accent-subtle)',
+              marginBottom: 'var(--space-4)'
+            }}
+          >
+            <Mail
+              style={{
+                width: 24,
+                height: 24,
+                color: 'var(--accent)'
+              }}
+            />
           </div>
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">
-            {isSignUp ? 'Create Account' : 'Welcome Back!'}
+          <h1
+            style={{
+              fontSize: 'var(--text-2xl)',
+              fontWeight: 600,
+              color: 'var(--ink)',
+              marginBottom: 'var(--space-2)',
+              letterSpacing: '-0.02em'
+            }}
+          >
+            {isSignUp ? 'Create Account' : 'Welcome Back'}
           </h1>
-          <p className="text-gray-600">
+          <p style={{ color: 'var(--ink-muted)', fontSize: 'var(--text-sm)' }}>
             {isSignUp ? 'Sign up for Family Schedule Assistant' : 'Sign in to your account'}
           </p>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-2">
+        {/* Form */}
+        <form onSubmit={handleSubmit}>
+          <div style={{ marginBottom: 'var(--space-4)' }}>
+            <label
+              htmlFor="email"
+              style={{
+                display: 'block',
+                fontSize: 'var(--text-sm)',
+                fontWeight: 500,
+                color: 'var(--ink)',
+                marginBottom: 'var(--space-2)'
+              }}
+            >
               Email address
             </label>
             <input
@@ -103,13 +140,22 @@ export default function Auth() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="you@example.com"
-              className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
+              className="input"
               disabled={loading}
             />
           </div>
 
-          <div>
-            <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-2">
+          <div style={{ marginBottom: 'var(--space-5)' }}>
+            <label
+              htmlFor="password"
+              style={{
+                display: 'block',
+                fontSize: 'var(--text-sm)',
+                fontWeight: 500,
+                color: 'var(--ink)',
+                marginBottom: 'var(--space-2)'
+              }}
+            >
               Password
             </label>
             <input
@@ -118,13 +164,19 @@ export default function Auth() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="••••••••"
-              className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
+              className="input"
               disabled={loading}
             />
           </div>
 
           {error && (
-            <div className="bg-red-50 border-2 border-red-200 rounded-lg p-3 text-sm text-red-700">
+            <div
+              className="info-box info-box-negative"
+              style={{
+                marginBottom: 'var(--space-4)',
+                fontSize: 'var(--text-sm)'
+              }}
+            >
               {error}
             </div>
           )}
@@ -132,28 +184,40 @@ export default function Auth() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            className="btn btn-primary"
+            style={{
+              width: '100%',
+              padding: 'var(--space-3) var(--space-5)',
+              fontSize: 'var(--text-base)',
+              fontWeight: 500
+            }}
           >
             {loading ? (
               <>
-                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                <span className="spinner" style={{ borderTopColor: 'white' }} />
                 {isSignUp ? 'Creating account...' : 'Signing in...'}
               </>
             ) : (
-              <>
-                {isSignUp ? 'Sign Up' : 'Sign In'}
-              </>
+              isSignUp ? 'Sign Up' : 'Sign In'
             )}
           </button>
         </form>
 
-        <div className="mt-6 text-center">
+        {/* Toggle */}
+        <div className="text-center" style={{ marginTop: 'var(--space-6)' }}>
           <button
             onClick={() => {
               setIsSignUp(!isSignUp);
               setError('');
             }}
-            className="text-blue-600 hover:text-blue-700 text-sm font-medium"
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--accent)',
+              fontSize: 'var(--text-sm)',
+              fontWeight: 500,
+              cursor: 'pointer'
+            }}
           >
             {isSignUp ? 'Already have an account? Sign in' : "Don't have an account? Sign up"}
           </button>

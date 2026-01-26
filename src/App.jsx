@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Trash2, Check, Calendar, Mail, Phone, LogOut, Globe } from 'lucide-react';
+import { Plus, Trash2, Check, Calendar, Mail, Phone, LogOut, Globe, UserPlus, AlertCircle, Pencil, Lock, MessageSquare } from 'lucide-react';
 import { supabase } from './lib/supabase';
 import Auth from './components/Auth';
 import OAuthCallback from './components/OAuthCallback';
@@ -25,6 +25,7 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [step, setStep] = useState(1);
   const [accountId, setAccountId] = useState(null);
+  // Family members now include contact info: { id, name, color, phone, email, contactPreference, isAccountOwner }
   const [familyMembers, setFamilyMembers] = useState([]);
   const [newMember, setNewMember] = useState('');
   const [newMemberColor, setNewMemberColor] = useState('9'); // Default blue
@@ -32,11 +33,20 @@ export default function App() {
   const [timezone, setTimezone] = useState('America/Chicago');
   const [timezoneDetecting, setTimezoneDetecting] = useState(false);
   const [calendarConnected, setCalendarConnected] = useState(false);
-  const [approvedSenders, setApprovedSenders] = useState({ phones: [], emails: [] });
-  const [newPhone, setNewPhone] = useState('');
-  const [newEmail, setNewEmail] = useState('');
+  // Account owner info (first family member)
+  const [accountOwnerName, setAccountOwnerName] = useState('');
+  const [accountOwnerPhone, setAccountOwnerPhone] = useState('');
+  const [accountOwnerContactPref, setAccountOwnerContactPref] = useState('email');
   const [setupComplete, setSetupComplete] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [stepError, setStepError] = useState('');
+  const [addingMember, setAddingMember] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [editingMember, setEditingMember] = useState(null);
+  const [editingName, setEditingName] = useState('');
+  const [savingOwner, setSavingOwner] = useState(false);
+  // Track local edits to contact fields (only save on blur)
+  const [editingContact, setEditingContact] = useState({});
 
   // Initialize or load account
   useEffect(() => {
@@ -125,21 +135,6 @@ export default function App() {
 
         accountData = data;
         console.log('Account created with ID:', accountData.id);
-
-        // Auto-add user's email as an approved sender
-        console.log('Auto-adding user email as approved sender:', session.user.email);
-        const { error: senderError } = await supabase
-          .from('approved_senders')
-          .insert([{
-            account_id: accountData.id,
-            sender_type: 'email',
-            sender_value: session.user.email
-          }]);
-
-        if (senderError) {
-          console.error('Error adding user email as approved sender:', senderError);
-          // Don't throw - this is non-critical
-        }
       }
 
       // Save to localStorage for OAuth callback
@@ -155,12 +150,12 @@ export default function App() {
         setStep(parseInt(returnToStep));
         localStorage.removeItem('returnToStep');
       }
-      
+
     } catch (error) {
       console.error('Error initializing account:', error);
       loadFromLocalStorage();
     }
-    
+
     setLoading(false);
   };
 
@@ -173,8 +168,14 @@ export default function App() {
         setConfirmPref(config.confirmPref || 'clarification-only');
         setTimezone(config.timezone || 'America/Chicago');
         setCalendarConnected(config.calendarConnected || false);
-        setApprovedSenders(config.approvedSenders || { phones: [], emails: [] });
         setSetupComplete(config.setupComplete || false);
+        // Load account owner info
+        const owner = (config.familyMembers || []).find(m => m.isAccountOwner);
+        if (owner) {
+          setAccountOwnerName(owner.name);
+          setAccountOwnerPhone(owner.phone || '');
+          setAccountOwnerContactPref(owner.contactPreference || 'email');
+        }
       }
     } catch (err) {
       console.log('No saved config found');
@@ -196,26 +197,31 @@ export default function App() {
         setCalendarConnected(!!account.google_calendar_id);
       }
 
-      // Load family members
+      // Load family members with contact fields
       const { data: members } = await supabase
         .from('family_members')
         .select('*')
         .eq('account_id', accId);
 
       if (members) {
-        setFamilyMembers(members.map(m => ({ id: m.id, name: m.name, color: m.color })));
-      }
+        const mappedMembers = members.map(m => ({
+          id: m.id,
+          name: m.name,
+          color: m.color,
+          phone: m.phone,
+          email: m.email,
+          contactPreference: m.contact_preference || 'email',
+          isAccountOwner: m.is_account_owner || false
+        }));
+        setFamilyMembers(mappedMembers);
 
-      // Load approved senders
-      const { data: senders } = await supabase
-        .from('approved_senders')
-        .select('*')
-        .eq('account_id', accId);
-
-      if (senders) {
-        const phones = senders.filter(s => s.sender_type === 'phone').map(s => s.sender_value);
-        const emails = senders.filter(s => s.sender_type === 'email').map(s => s.sender_value);
-        setApprovedSenders({ phones, emails });
+        // Load account owner info
+        const owner = mappedMembers.find(m => m.isAccountOwner);
+        if (owner) {
+          setAccountOwnerName(owner.name);
+          setAccountOwnerPhone(owner.phone || '');
+          setAccountOwnerContactPref(owner.contactPreference || 'email');
+        }
       }
 
       // Set setupComplete based on database value for this account
@@ -228,6 +234,8 @@ export default function App() {
 
   const addFamilyMember = async () => {
     if (!newMember.trim()) return;
+    setAddingMember(true);
+    setStepError('');
 
     if (supabase && accountId) {
       try {
@@ -243,20 +251,27 @@ export default function App() {
 
         if (error) throw error;
 
-        setFamilyMembers([...familyMembers, { id: data.id, name: data.name, color: data.color }]);
+        setFamilyMembers([...familyMembers, { id: data.id, name: data.name, color: data.color, isNew: true }]);
         setNewMember('');
-        setNewMemberColor('9'); // Reset to default blue
+        setNewMemberColor('9');
+        // Clear the "new" flag after animation
+        setTimeout(() => {
+          setFamilyMembers(prev => prev.map(m => ({ ...m, isNew: false })));
+        }, 300);
       } catch (error) {
         console.error('Error adding family member:', error);
-        alert('Failed to add family member. Please try again.');
+        setStepError('Failed to add family member. Please try again.');
       }
     } else {
-      // Fallback to localStorage
-      setFamilyMembers([...familyMembers, { id: Date.now(), name: newMember.trim(), color: newMemberColor }]);
+      setFamilyMembers([...familyMembers, { id: Date.now(), name: newMember.trim(), color: newMemberColor, isNew: true }]);
       setNewMember('');
       setNewMemberColor('9');
       saveToLocalStorage();
+      setTimeout(() => {
+        setFamilyMembers(prev => prev.map(m => ({ ...m, isNew: false })));
+      }, 300);
     }
+    setAddingMember(false);
   };
 
   const removeFamilyMember = async (id) => {
@@ -295,7 +310,7 @@ export default function App() {
         ));
       } catch (error) {
         console.error('Error updating family member color:', error);
-        alert('Failed to update color. Please try again.');
+        setStepError('Failed to update color. Please try again.');
       }
     } else {
       setFamilyMembers(familyMembers.map(m =>
@@ -305,160 +320,253 @@ export default function App() {
     }
   };
 
-  const addPhone = async () => {
-    if (!newPhone.trim()) return;
-
-    // Normalize phone number - strip all non-numeric characters
-    let normalizedPhone = newPhone.trim().replace(/\D/g, '');
-
-    // Add country code if not present (assume US +1)
-    if (normalizedPhone.length === 10) {
-      normalizedPhone = '1' + normalizedPhone;
+  const updateFamilyMemberName = async (id, newName) => {
+    if (!newName.trim()) {
+      setEditingMember(null);
+      setEditingName('');
+      return;
     }
 
-    console.log('Adding phone:', newPhone.trim(), '-> normalized:', normalizedPhone);
-    console.log('accountId:', accountId);
-    console.log('supabase:', !!supabase);
-
-    if (supabase && accountId) {
-      try {
-        console.log('Inserting phone into database...');
-        const { data, error } = await supabase
-          .from('approved_senders')
-          .insert([{
-            account_id: accountId,
-            sender_type: 'phone',
-            sender_value: normalizedPhone
-          }])
-          .select();
-
-        if (error) {
-          console.error('Database error:', error);
-          throw error;
-        }
-
-        console.log('Phone added successfully:', data);
-
-        setApprovedSenders({
-          ...approvedSenders,
-          phones: [...approvedSenders.phones, normalizedPhone]
-        });
-        setNewPhone('');
-      } catch (error) {
-        console.error('Error adding phone:', error);
-        alert('Failed to add phone number. Please try again.');
-      }
-    } else {
-      console.warn('Falling back to localStorage (supabase or accountId missing)');
-      setApprovedSenders({
-        ...approvedSenders,
-        phones: [...approvedSenders.phones, normalizedPhone]
-      });
-      setNewPhone('');
-      saveToLocalStorage();
-    }
-  };
-
-  const addEmail = async () => {
-    if (!newEmail.trim()) return;
-
-    console.log('Adding email:', newEmail.trim());
-    console.log('accountId:', accountId);
-    console.log('supabase:', !!supabase);
-
-    if (supabase && accountId) {
-      try {
-        console.log('Inserting email into database...');
-        const { data, error } = await supabase
-          .from('approved_senders')
-          .insert([{
-            account_id: accountId,
-            sender_type: 'email',
-            sender_value: newEmail.trim()
-          }])
-          .select();
-
-        if (error) {
-          console.error('Database error:', error);
-          throw error;
-        }
-
-        console.log('Email added successfully:', data);
-
-        setApprovedSenders({
-          ...approvedSenders,
-          emails: [...approvedSenders.emails, newEmail.trim()]
-        });
-        setNewEmail('');
-      } catch (error) {
-        console.error('Error adding email:', error);
-        alert('Failed to add email address. Please try again.');
-      }
-    } else {
-      console.warn('Falling back to localStorage (supabase or accountId missing)');
-      setApprovedSenders({
-        ...approvedSenders,
-        emails: [...approvedSenders.emails, newEmail.trim()]
-      });
-      setNewEmail('');
-      saveToLocalStorage();
-    }
-  };
-
-  const removePhone = async (phone) => {
     if (supabase && accountId) {
       try {
         const { error } = await supabase
-          .from('approved_senders')
-          .delete()
-          .eq('account_id', accountId)
-          .eq('sender_type', 'phone')
-          .eq('sender_value', phone);
+          .from('family_members')
+          .update({ name: newName.trim() })
+          .eq('id', id);
 
         if (error) throw error;
-        
-        setApprovedSenders({
-          ...approvedSenders,
-          phones: approvedSenders.phones.filter(p => p !== phone)
-        });
+
+        setFamilyMembers(familyMembers.map(m =>
+          m.id === id ? { ...m, name: newName.trim() } : m
+        ));
       } catch (error) {
-        console.error('Error removing phone:', error);
+        console.error('Error updating family member name:', error);
+        setStepError('Failed to update name. Please try again.');
       }
     } else {
-      setApprovedSenders({
-        ...approvedSenders,
-        phones: approvedSenders.phones.filter(p => p !== phone)
-      });
+      setFamilyMembers(familyMembers.map(m =>
+        m.id === id ? { ...m, name: newName.trim() } : m
+      ));
+      saveToLocalStorage();
+    }
+    setEditingMember(null);
+    setEditingName('');
+  };
+
+  const startEditingMember = (member) => {
+    setEditingMember(member.id);
+    setEditingName(member.name);
+    setConfirmDelete(null);
+  };
+
+  // Normalize phone number to E.164 format without +
+  const normalizePhone = (phone) => {
+    if (!phone) return null;
+    let normalized = phone.replace(/\D/g, '');
+    if (normalized.length === 10) {
+      normalized = '1' + normalized;
+    }
+    return normalized || null;
+  };
+
+  // Save account owner as first family member
+  const saveAccountOwner = async () => {
+    if (!accountOwnerName.trim()) {
+      setStepError('Please enter your name');
+      return false;
+    }
+
+    setSavingOwner(true);
+    setStepError('');
+
+    const normalizedPhone = normalizePhone(accountOwnerPhone);
+
+    if (supabase && accountId && session) {
+      try {
+        // Check if account owner already exists
+        const existingOwner = familyMembers.find(m => m.isAccountOwner);
+
+        if (existingOwner) {
+          // Update existing
+          const { error } = await supabase
+            .from('family_members')
+            .update({
+              name: accountOwnerName.trim(),
+              phone: normalizedPhone,
+              email: session.user.email,
+              contact_preference: accountOwnerContactPref,
+              is_account_owner: true
+            })
+            .eq('id', existingOwner.id);
+
+          if (error) throw error;
+
+          setFamilyMembers(familyMembers.map(m =>
+            m.id === existingOwner.id
+              ? { ...m, name: accountOwnerName.trim(), phone: normalizedPhone, email: session.user.email, contactPreference: accountOwnerContactPref }
+              : m
+          ));
+        } else {
+          // Create new
+          const { data, error } = await supabase
+            .from('family_members')
+            .insert([{
+              account_id: accountId,
+              name: accountOwnerName.trim(),
+              color: '9', // Default blue
+              phone: normalizedPhone,
+              email: session.user.email,
+              contact_preference: accountOwnerContactPref,
+              is_account_owner: true
+            }])
+            .select()
+            .single();
+
+          if (error) throw error;
+
+          setFamilyMembers([{
+            id: data.id,
+            name: data.name,
+            color: data.color,
+            phone: data.phone,
+            email: data.email,
+            contactPreference: data.contact_preference,
+            isAccountOwner: true
+          }, ...familyMembers]);
+        }
+
+        setSavingOwner(false);
+        return true;
+      } catch (error) {
+        console.error('Error saving account owner:', error);
+        setStepError('Failed to save. Please try again.');
+        setSavingOwner(false);
+        return false;
+      }
+    } else {
+      // Demo mode - localStorage
+      const existingOwner = familyMembers.find(m => m.isAccountOwner);
+      const ownerData = {
+        id: existingOwner?.id || Date.now(),
+        name: accountOwnerName.trim(),
+        color: existingOwner?.color || '9',
+        phone: normalizedPhone,
+        email: session?.user?.email || 'demo@example.com',
+        contactPreference: accountOwnerContactPref,
+        isAccountOwner: true
+      };
+
+      if (existingOwner) {
+        setFamilyMembers(familyMembers.map(m => m.isAccountOwner ? ownerData : m));
+      } else {
+        setFamilyMembers([ownerData, ...familyMembers]);
+      }
+      saveToLocalStorage();
+      setSavingOwner(false);
+      return true;
+    }
+  };
+
+  // Update local contact field while typing (no database call)
+  const handleContactChange = (id, field, value) => {
+    setEditingContact(prev => ({
+      ...prev,
+      [`${id}-${field}`]: value
+    }));
+  };
+
+  // Get the current value for a contact field (editing value or saved value)
+  const getContactValue = (member, field) => {
+    const editKey = `${member.id}-${field}`;
+    if (editKey in editingContact) {
+      return editingContact[editKey];
+    }
+    return member[field] || '';
+  };
+
+  // Save contact field to database on blur
+  const saveContactField = async (id, field) => {
+    const editKey = `${id}-${field}`;
+    if (!(editKey in editingContact)) return; // Nothing to save
+
+    const value = editingContact[editKey];
+    const member = familyMembers.find(m => m.id === id);
+    if (!member) return;
+
+    let dbField = field;
+    let dbValue = value;
+
+    // Map field names and normalize values
+    if (field === 'phone') {
+      dbValue = normalizePhone(value);
+    } else if (field === 'contactPreference') {
+      dbField = 'contact_preference';
+    }
+
+    // Update local state immediately
+    setFamilyMembers(familyMembers.map(m =>
+      m.id === id ? { ...m, [field]: field === 'phone' ? dbValue : value } : m
+    ));
+
+    // Clear the editing state for this field
+    setEditingContact(prev => {
+      const next = { ...prev };
+      delete next[editKey];
+      return next;
+    });
+
+    if (supabase && accountId) {
+      try {
+        const { error } = await supabase
+          .from('family_members')
+          .update({ [dbField]: dbValue })
+          .eq('id', id);
+
+        if (error) throw error;
+      } catch (error) {
+        console.error('Error updating family member contact:', error);
+        setStepError('Failed to save. Please try again.');
+      }
+    } else {
       saveToLocalStorage();
     }
   };
 
-  const removeEmail = async (email) => {
+  // Update contact preference immediately (radio buttons don't need blur handling)
+  const updateContactPreference = async (id, value) => {
+    const member = familyMembers.find(m => m.id === id);
+    if (!member) return;
+
+    // Update local state immediately
+    setFamilyMembers(familyMembers.map(m =>
+      m.id === id ? { ...m, contactPreference: value } : m
+    ));
+
     if (supabase && accountId) {
       try {
         const { error } = await supabase
-          .from('approved_senders')
-          .delete()
-          .eq('account_id', accountId)
-          .eq('sender_type', 'email')
-          .eq('sender_value', email);
+          .from('family_members')
+          .update({ contact_preference: value })
+          .eq('id', id);
 
         if (error) throw error;
-        
-        setApprovedSenders({
-          ...approvedSenders,
-          emails: approvedSenders.emails.filter(e => e !== email)
-        });
       } catch (error) {
-        console.error('Error removing email:', error);
+        console.error('Error updating contact preference:', error);
+        setStepError('Failed to save. Please try again.');
       }
     } else {
-      setApprovedSenders({
-        ...approvedSenders,
-        emails: approvedSenders.emails.filter(e => e !== email)
-      });
       saveToLocalStorage();
     }
+  };
+
+  // Check if a family member can send messages (has phone or email)
+  const canSendMessages = (member) => {
+    return !!(member.phone || member.email);
+  };
+
+  // Get count of family members who can send messages
+  const getSenderCount = () => {
+    return familyMembers.filter(canSendMessages).length;
   };
 
   const saveToLocalStorage = () => {
@@ -467,7 +575,6 @@ export default function App() {
       confirmPref,
       timezone,
       calendarConnected,
-      approvedSenders,
       setupComplete
     };
     localStorage.setItem('family-schedule-config', JSON.stringify(config));
@@ -541,55 +648,30 @@ export default function App() {
       confirmPref,
       timezone,
       calendarConnected,
-      approvedSenders,
       setupComplete: true
     };
     localStorage.setItem('family-schedule-config', JSON.stringify(config));
   };
 
   const nextStep = async () => {
-    if (step === 1 && familyMembers.length === 0) {
-      alert('Please add at least one family member');
+    setStepError('');
+
+    // Step 1: Account owner setup
+    if (step === 1) {
+      const success = await saveAccountOwner();
+      if (!success) return;
+    }
+
+    // Step 2: Family members - no validation required (account owner is enough)
+
+    // Step 4: Google Calendar
+    if (step === 4 && !calendarConnected) {
+      setStepError('Please connect your Google Calendar to continue');
       return;
     }
-    if (step === 3 && !calendarConnected) {
-      alert('Please connect your Google Calendar');
-      return;
-    }
-    if (step === 4) {
-      // Auto-save any entered phone/email before validating
-      if (newPhone.trim()) {
-        await addPhone();
-        // Give state time to update
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-      if (newEmail.trim()) {
-        await addEmail();
-        // Give state time to update
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
 
-      // Reload from database to ensure state is fresh
-      if (supabase && accountId) {
-        const { data: senders } = await supabase
-          .from('approved_senders')
-          .select('*')
-          .eq('account_id', accountId);
-
-        if (senders) {
-          const phones = senders.filter(s => s.sender_type === 'phone').map(s => s.sender_value);
-          const emails = senders.filter(s => s.sender_type === 'email').map(s => s.sender_value);
-          setApprovedSenders({ phones, emails });
-        }
-      }
-
-      // Now validate
-      if (approvedSenders.phones.length === 0 && approvedSenders.emails.length === 0 && !newPhone.trim() && !newEmail.trim()) {
-        alert('Please add at least one approved sender');
-        return;
-      }
-    }
     if (step < 5) {
+      setStepError('');
       setStep(step + 1);
     } else {
       await completeSetup();
@@ -644,8 +726,8 @@ export default function App() {
 
       console.log('Tokens saved successfully:', data);
 
-      // Redirect back to setup at step 3 with calendar connected
-      localStorage.setItem('returnToStep', '3');
+      // Redirect back to setup at step 4 with calendar connected
+      localStorage.setItem('returnToStep', '4');
       window.location.href = '/';
     } catch (error) {
       console.error('Error saving Google tokens:', error);
@@ -660,7 +742,9 @@ export default function App() {
       setSession(null);
       setAccountId(null);
       setFamilyMembers([]);
-      setApprovedSenders({ phones: [], emails: [] });
+      setAccountOwnerName('');
+      setAccountOwnerPhone('');
+      setAccountOwnerContactPref('email');
       setSetupComplete(false);
       setStep(1);
       localStorage.removeItem('accountId');
@@ -688,175 +772,444 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center">
+      <div
+        className="min-h-screen flex items-center justify-center"
+        style={{ background: 'var(--canvas)' }}
+      >
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p className="text-gray-600">Loading...</p>
+          <div
+            className="spinner mx-auto"
+            style={{
+              width: 32,
+              height: 32,
+              borderWidth: 3,
+              borderTopColor: 'var(--accent)',
+              marginBottom: 'var(--space-4)'
+            }}
+          />
+          <p style={{ color: 'var(--ink-muted)', fontSize: 'var(--text-sm)' }}>Loading...</p>
         </div>
       </div>
     );
   }
 
+  // Completion screen
   if (setupComplete) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
-        <div className="max-w-2xl mx-auto bg-white rounded-2xl shadow-xl p-8">
-          <div className="text-center mb-8">
-            <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <Check className="w-8 h-8 text-green-600" />
+      <div
+        className="min-h-screen"
+        style={{ background: 'var(--canvas)', padding: 'var(--space-6)' }}
+      >
+        <div
+          className="max-w-2xl mx-auto surface-raised"
+          style={{ padding: 'var(--space-8)' }}
+        >
+          {/* Header */}
+          <div className="text-center" style={{ marginBottom: 'var(--space-8)' }}>
+            <div
+              className="icon-circle icon-circle-lg mx-auto"
+              style={{
+                background: 'var(--positive-subtle)',
+                marginBottom: 'var(--space-4)'
+              }}
+            >
+              <Check style={{ width: 28, height: 28, color: 'var(--positive)' }} />
             </div>
-            <h1 className="text-3xl font-bold text-gray-900 mb-2">Setup Complete!</h1>
-            <p className="text-gray-600">Your Family Schedule Assistant is ready to use</p>
-            {supabase && <p className="text-sm text-green-600 mt-2">✓ Connected to Supabase</p>}
+            <h1
+              style={{
+                fontSize: 'var(--text-2xl)',
+                fontWeight: 600,
+                color: 'var(--ink)',
+                marginBottom: 'var(--space-2)',
+                letterSpacing: '-0.02em'
+              }}
+            >
+              Setup Complete
+            </h1>
+            <p style={{ color: 'var(--ink-muted)', fontSize: 'var(--text-sm)' }}>
+              Your Family Schedule Assistant is ready to use
+            </p>
+            {supabase && (
+              <span
+                className="badge badge-positive"
+                style={{ marginTop: 'var(--space-3)', display: 'inline-flex' }}
+              >
+                Connected to Supabase
+              </span>
+            )}
           </div>
 
-          <div className="space-y-6">
-            <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-6">
-              <h3 className="font-semibold text-lg mb-4 flex items-center">
-                <Phone className="w-5 h-5 mr-2 text-blue-600" />
-                Text Your Calendar Assistant
-              </h3>
-              <div className="bg-white rounded-lg p-4 font-mono text-xl text-center">
+          {/* Contact methods */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+            {/* SMS */}
+            <div className="info-box info-box-accent">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
+                <Phone style={{ width: 20, height: 20, color: 'var(--accent)' }} />
+                <span style={{ fontWeight: 600, color: 'var(--ink)' }}>Text Your Calendar Assistant</span>
+              </div>
+              <div
+                style={{
+                  background: 'var(--paper)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: 'var(--space-4)',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 'var(--text-xl)',
+                  textAlign: 'center',
+                  color: 'var(--ink)',
+                  letterSpacing: '0.02em'
+                }}
+              >
                 +1 (414) 667-6770
               </div>
-              <p className="text-sm text-gray-600 mt-3">
-                Text this number from your approved phone number(s) to create calendar events
+              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--ink-muted)', marginTop: 'var(--space-3)' }}>
+                Text this number from a registered family member's phone to create calendar events
               </p>
-              <div className="mt-4 bg-blue-100 rounded-lg p-3">
-                <p className="text-xs text-blue-800">
-                  <strong>Your approved phone numbers:</strong>
-                </p>
-                <ul className="text-xs text-blue-700 mt-1 space-y-1">
-                  {approvedSenders.phones.map(phone => (
-                    <li key={phone} className="font-mono">• {phone}</li>
-                  ))}
-                </ul>
-              </div>
             </div>
 
-            <div className="bg-purple-50 border-2 border-purple-200 rounded-xl p-6">
-              <h3 className="font-semibold text-lg mb-4 flex items-center">
-                <Mail className="w-5 h-5 mr-2 text-purple-600" />
-                Email Integration
+            {/* Family members who can send messages */}
+            <div className="surface-sunken" style={{ padding: 'var(--space-5)' }}>
+              <h3 style={{ fontWeight: 600, marginBottom: 'var(--space-4)', color: 'var(--ink)' }}>
+                Family Members
               </h3>
-              <p className="text-sm text-gray-600">
-                Email integration coming soon! For now, use SMS to create calendar events.
-              </p>
-              {approvedSenders.emails.length > 0 && (
-                <div className="mt-4 bg-purple-100 rounded-lg p-3">
-                  <p className="text-xs text-purple-800">
-                    <strong>Your approved email addresses:</strong>
-                  </p>
-                  <ul className="text-xs text-purple-700 mt-1 space-y-1">
-                    {approvedSenders.emails.map(email => (
-                      <li key={email} className="font-mono">• {email}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-
-            <div className="bg-gray-50 rounded-xl p-6">
-              <h3 className="font-semibold text-lg mb-3">Configuration Summary</h3>
-              <div className="space-y-2 text-sm">
-                <p><span className="font-medium">Family Members:</span> {familyMembers.map(m => m.name).join(', ')}</p>
-                <p><span className="font-medium">Confirmations:</span> {confirmPref === 'always' ? 'Always' : confirmPref === 'never' ? 'Never' : 'Only when clarification needed'}</p>
-                <p><span className="font-medium">Timezone:</span> {getTimezoneLabel(timezone)}</p>
-                <p><span className="font-medium">Approved Senders:</span> {approvedSenders.phones.length} phone(s), {approvedSenders.emails.length} email(s)</p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+                {familyMembers.map(member => {
+                  const memberColor = CALENDAR_COLORS.find(c => c.id === member.color);
+                  const canSend = canSendMessages(member);
+                  return (
+                    <div key={member.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                        <div
+                          style={{
+                            width: 16,
+                            height: 16,
+                            borderRadius: '50%',
+                            backgroundColor: memberColor?.color || '#5484ed',
+                            flexShrink: 0
+                          }}
+                        />
+                        <span style={{ fontWeight: 500, color: 'var(--ink)' }}>
+                          {member.name}
+                          {member.isAccountOwner && (
+                            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--ink-muted)', marginLeft: 'var(--space-2)' }}>(you)</span>
+                          )}
+                        </span>
+                      </div>
+                      {canSend && (
+                        <span className="badge badge-positive">
+                          <MessageSquare style={{ width: 12, height: 12 }} />
+                          Can send
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
-            <div className="flex gap-3">
-              <button
-                onClick={() => setSetupComplete(false)}
-                className="flex-1 py-3 bg-gray-200 text-gray-700 rounded-lg font-medium hover:bg-gray-300 transition"
-              >
-                Edit Settings
-              </button>
-              {supabase && session && (
-                <button
-                  onClick={handleLogout}
-                  className="px-6 py-3 bg-red-50 text-red-600 rounded-lg font-medium hover:bg-red-100 transition flex items-center gap-2"
-                >
-                  <LogOut className="w-5 h-5" />
-                  Logout
-                </button>
-              )}
+            {/* Summary */}
+            <div className="surface-sunken" style={{ padding: 'var(--space-5)' }}>
+              <h3 style={{ fontWeight: 600, marginBottom: 'var(--space-4)', color: 'var(--ink)' }}>
+                Configuration Summary
+              </h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', fontSize: 'var(--text-sm)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'var(--ink-muted)' }}>Confirmations</span>
+                  <span style={{ color: 'var(--ink)' }}>
+                    {confirmPref === 'always' ? 'Always' : confirmPref === 'never' ? 'Never' : 'When needed'}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'var(--ink-muted)' }}>Timezone</span>
+                  <span style={{ color: 'var(--ink)' }}>{getTimezoneLabel(timezone)}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'var(--ink-muted)' }}>Who can send messages</span>
+                  <span style={{ color: 'var(--ink)' }}>
+                    {getSenderCount()} family member(s)
+                  </span>
+                </div>
+              </div>
             </div>
+          </div>
+
+          {/* Actions */}
+          <div style={{ display: 'flex', gap: 'var(--space-3)', marginTop: 'var(--space-6)' }}>
+            <button
+              onClick={() => setSetupComplete(false)}
+              className="btn btn-secondary"
+              style={{ flex: 1 }}
+            >
+              Edit Settings
+            </button>
+            {supabase && session && (
+              <button
+                onClick={handleLogout}
+                className="btn btn-danger"
+                style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}
+              >
+                <LogOut style={{ width: 18, height: 18 }} />
+                Logout
+              </button>
+            )}
           </div>
         </div>
       </div>
     );
   }
 
+  // Setup wizard
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
-      <div className="max-w-2xl mx-auto bg-white rounded-2xl shadow-xl p-8">
-        <div className="mb-8">
-          <div className="flex justify-between items-start mb-4">
+    <div
+      className="min-h-screen"
+      style={{ background: 'var(--canvas)', padding: 'var(--space-6)' }}
+    >
+      <div
+        className="max-w-2xl mx-auto surface-raised"
+        style={{ padding: 'var(--space-8)' }}
+      >
+        {/* Header */}
+        <div style={{ marginBottom: 'var(--space-6)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
             <div>
-              <h1 className="text-3xl font-bold text-gray-900 mb-2">Family Schedule Assistant</h1>
-              <p className="text-gray-600">Set up your account in a few simple steps</p>
+              <h1
+                style={{
+                  fontSize: 'var(--text-2xl)',
+                  fontWeight: 600,
+                  color: 'var(--ink)',
+                  marginBottom: 'var(--space-1)',
+                  letterSpacing: '-0.02em'
+                }}
+              >
+                Family Schedule Assistant
+              </h1>
+              <p style={{ color: 'var(--ink-muted)', fontSize: 'var(--text-sm)' }}>
+                Set up your account in a few simple steps
+              </p>
             </div>
             {supabase && session && (
               <button
                 onClick={handleLogout}
-                className="px-4 py-2 bg-red-50 text-red-600 rounded-lg font-medium hover:bg-red-100 transition flex items-center gap-2 text-sm"
+                className="btn btn-ghost"
+                style={{ fontSize: 'var(--text-sm)' }}
               >
-                <LogOut className="w-4 h-4" />
+                <LogOut style={{ width: 16, height: 16 }} />
                 Logout
               </button>
             )}
           </div>
         </div>
 
-        {/* Progress Bar */}
-        <div className="mb-8">
-          <div className="flex justify-between mb-2">
+        {/* Progress indicator */}
+        <div style={{ marginBottom: 'var(--space-8)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 'var(--space-3)' }}>
             {[1, 2, 3, 4, 5].map(num => (
               <button
                 key={num}
                 onClick={() => setStep(num)}
-                className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold transition-all hover:scale-110 ${
-                  num <= step ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-gray-200 text-gray-500 hover:bg-gray-300'
-                }`}
+                className={`step-indicator ${num < step ? 'complete' : num === step ? 'active' : 'inactive'}`}
+                style={{ cursor: 'pointer' }}
               >
-                {num}
+                {num < step ? <Check style={{ width: 14, height: 14 }} /> : num}
               </button>
             ))}
           </div>
-          <div className="h-2 bg-gray-200 rounded-full">
+          <div
+            style={{
+              height: 4,
+              background: 'var(--paper-sunken)',
+              borderRadius: 2,
+              overflow: 'hidden'
+            }}
+          >
             <div
-              className="h-2 bg-blue-600 rounded-full transition-all"
-              style={{ width: `${(step / 5) * 100}%` }}
+              style={{
+                height: '100%',
+                width: `${(step / 5) * 100}%`,
+                background: 'var(--accent)',
+                borderRadius: 2,
+                transition: 'width 0.3s ease-out'
+              }}
             />
           </div>
         </div>
 
-        {/* Step 1: Family Members */}
+        {/* Step 1: Your Info (Account Owner) */}
         {step === 1 && (
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-2xl font-bold mb-2">Who's in your family?</h2>
-              <p className="text-gray-600">Add the names of family members you want to track schedules for</p>
+          <div className="step-content">
+            <div style={{ marginBottom: 'var(--space-5)' }}>
+              <h2
+                style={{
+                  fontSize: 'var(--text-xl)',
+                  fontWeight: 600,
+                  color: 'var(--ink)',
+                  marginBottom: 'var(--space-1)'
+                }}
+              >
+                Tell us about yourself
+              </h2>
+              <p style={{ color: 'var(--ink-muted)', fontSize: 'var(--text-sm)' }}>
+                You'll be the first family member. Your contact info lets you send messages to the calendar.
+              </p>
             </div>
 
-            <div className="flex gap-2">
+            {stepError && (
+              <div className="inline-error">
+                <AlertCircle style={{ width: 16, height: 16, flexShrink: 0 }} />
+                {stepError}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+              {/* Name */}
+              <div>
+                <label style={{ display: 'block', fontSize: 'var(--text-sm)', fontWeight: 500, color: 'var(--ink)', marginBottom: 'var(--space-2)' }}>
+                  Your name <span style={{ color: 'var(--negative)' }}>*</span>
+                </label>
+                <input
+                  type="text"
+                  value={accountOwnerName}
+                  onChange={(e) => setAccountOwnerName(e.target.value)}
+                  placeholder="Enter your name"
+                  className="input"
+                  disabled={savingOwner}
+                />
+              </div>
+
+              {/* Email (read-only from session) */}
+              <div>
+                <label style={{ display: 'block', fontSize: 'var(--text-sm)', fontWeight: 500, color: 'var(--ink)', marginBottom: 'var(--space-2)' }}>
+                  Email address
+                </label>
+                <div
+                  className="input"
+                  style={{
+                    background: 'var(--paper-sunken)',
+                    color: 'var(--ink-muted)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 'var(--space-2)'
+                  }}
+                >
+                  <Mail style={{ width: 16, height: 16, color: 'var(--ink-subtle)' }} />
+                  {session?.user?.email || 'demo@example.com'}
+                  <span className="badge badge-positive" style={{ marginLeft: 'auto' }}>Verified</span>
+                </div>
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--ink-subtle)', marginTop: 'var(--space-1)' }}>
+                  This is your login email and will be used to authorize messages
+                </p>
+              </div>
+
+              {/* Phone (optional) */}
+              <div>
+                <label style={{ display: 'block', fontSize: 'var(--text-sm)', fontWeight: 500, color: 'var(--ink)', marginBottom: 'var(--space-2)' }}>
+                  Phone number <span style={{ color: 'var(--ink-subtle)', fontWeight: 400 }}>(optional)</span>
+                </label>
+                <input
+                  type="tel"
+                  value={accountOwnerPhone}
+                  onChange={(e) => setAccountOwnerPhone(e.target.value)}
+                  placeholder="+1 (555) 123-4567"
+                  className="input"
+                  disabled={savingOwner}
+                />
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--ink-subtle)', marginTop: 'var(--space-1)' }}>
+                  Add your phone to send calendar updates via SMS
+                </p>
+              </div>
+
+              {/* Contact preference */}
+              <div>
+                <label style={{ display: 'block', fontSize: 'var(--text-sm)', fontWeight: 500, color: 'var(--ink)', marginBottom: 'var(--space-2)' }}>
+                  Preferred notification method
+                </label>
+                <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                  <label
+                    className={`option-card ${accountOwnerContactPref === 'email' ? 'selected' : ''}`}
+                    style={{ flex: 1, padding: 'var(--space-3)', cursor: 'pointer' }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                      <input
+                        type="radio"
+                        name="ownerContactPref"
+                        value="email"
+                        checked={accountOwnerContactPref === 'email'}
+                        onChange={(e) => setAccountOwnerContactPref(e.target.value)}
+                        className="radio-custom"
+                      />
+                      <Mail style={{ width: 16, height: 16, color: 'var(--ink-muted)' }} />
+                      <span style={{ fontWeight: 500, color: 'var(--ink)' }}>Email</span>
+                    </div>
+                  </label>
+                  <label
+                    className={`option-card ${accountOwnerContactPref === 'sms' ? 'selected' : ''}`}
+                    style={{ flex: 1, padding: 'var(--space-3)', cursor: 'pointer' }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                      <input
+                        type="radio"
+                        name="ownerContactPref"
+                        value="sms"
+                        checked={accountOwnerContactPref === 'sms'}
+                        onChange={(e) => setAccountOwnerContactPref(e.target.value)}
+                        className="radio-custom"
+                        disabled={!accountOwnerPhone}
+                      />
+                      <Phone style={{ width: 16, height: 16, color: 'var(--ink-muted)' }} />
+                      <span style={{ fontWeight: 500, color: 'var(--ink)' }}>SMS</span>
+                    </div>
+                  </label>
+                </div>
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--ink-subtle)', marginTop: 'var(--space-2)' }}>
+                  How you'd like to receive notifications about calendar updates
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Step 2: Family Members */}
+        {step === 2 && (
+          <div className="step-content">
+            <div style={{ marginBottom: 'var(--space-5)' }}>
+              <h2
+                style={{
+                  fontSize: 'var(--text-xl)',
+                  fontWeight: 600,
+                  color: 'var(--ink)',
+                  marginBottom: 'var(--space-1)'
+                }}
+              >
+                Add family members
+              </h2>
+              <p style={{ color: 'var(--ink-muted)', fontSize: 'var(--text-sm)' }}>
+                Add other family members to track. You can add their contact info to let them send calendar updates too.
+              </p>
+            </div>
+
+            {stepError && (
+              <div className="inline-error">
+                <AlertCircle style={{ width: 16, height: 16, flexShrink: 0 }} />
+                {stepError}
+              </div>
+            )}
+
+            {/* Add new member */}
+            <div style={{ display: 'flex', gap: 'var(--space-2)', marginBottom: 'var(--space-4)' }}>
               <input
                 type="text"
                 value={newMember}
                 onChange={(e) => setNewMember(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && addFamilyMember()}
+                onKeyPress={(e) => e.key === 'Enter' && !addingMember && addFamilyMember()}
                 placeholder="Enter a name"
-                className="flex-1 px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
+                className="input"
+                style={{ flex: 1 }}
+                disabled={addingMember}
               />
-
-              {/* Color Dropdown */}
               <select
                 value={newMemberColor}
                 onChange={(e) => setNewMemberColor(e.target.value)}
-                className="px-3 py-2 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
-                style={{ minWidth: '120px' }}
+                className="select"
+                disabled={addingMember}
               >
                 {CALENDAR_COLORS.map((colorOption) => (
                   <option key={colorOption.id} value={colorOption.id}>
@@ -864,307 +1217,491 @@ export default function App() {
                   </option>
                 ))}
               </select>
-
               <button
                 onClick={addFamilyMember}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition flex items-center gap-2"
+                className={`btn btn-primary ${addingMember ? 'btn-loading' : ''}`}
+                disabled={addingMember}
               >
-                <Plus className="w-5 h-5" />
+                <Plus style={{ width: 18, height: 18 }} />
                 Add
               </button>
             </div>
 
-            <div className="space-y-2">
+            {/* Family members list */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
               {familyMembers.map(member => {
                 const memberColor = CALENDAR_COLORS.find(c => c.id === member.color);
+                const isConfirming = confirmDelete === member.id;
+                const isEditing = editingMember === member.id;
+                const canSend = canSendMessages(member);
                 return (
                   <div
                     key={member.id}
-                    className="flex items-center justify-between bg-gray-50 px-4 py-3 rounded-lg"
+                    className={`surface ${member.isNew ? 'list-item-new' : ''}`}
+                    style={{ padding: 'var(--space-4)' }}
                   >
-                    <div className="flex items-center gap-3">
-                      <div
-                        className="w-6 h-6 rounded-full flex-shrink-0"
-                        style={{ backgroundColor: memberColor?.color || '#5484ed' }}
-                        title={memberColor?.name || 'Blueberry'}
-                      />
-                      <span className="font-medium">{member.name}</span>
+                    {/* Header row with name, color, actions */}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-3)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flex: 1, minWidth: 0 }}>
+                        <div
+                          style={{
+                            width: 24,
+                            height: 24,
+                            borderRadius: '50%',
+                            backgroundColor: memberColor?.color || '#5484ed',
+                            flexShrink: 0
+                          }}
+                          title={memberColor?.name || 'Blueberry'}
+                        />
+                        {isEditing ? (
+                          <input
+                            type="text"
+                            value={editingName}
+                            onChange={(e) => setEditingName(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                updateFamilyMemberName(member.id, editingName);
+                              } else if (e.key === 'Escape') {
+                                setEditingMember(null);
+                                setEditingName('');
+                              }
+                            }}
+                            onBlur={() => updateFamilyMemberName(member.id, editingName)}
+                            className="input"
+                            style={{ flex: 1, padding: 'var(--space-1) var(--space-2)', fontSize: 'var(--text-sm)' }}
+                            autoFocus
+                          />
+                        ) : (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                            <span
+                              style={{ fontWeight: 600, color: 'var(--ink)', cursor: member.isAccountOwner ? 'default' : 'pointer' }}
+                              onClick={() => !member.isAccountOwner && startEditingMember(member)}
+                              title={member.isAccountOwner ? '' : 'Click to edit'}
+                            >
+                              {member.name}
+                            </span>
+                            {member.isAccountOwner && (
+                              <span className="badge" style={{ background: 'var(--accent-subtle)', color: 'var(--accent)' }}>You</span>
+                            )}
+                            {canSend && (
+                              <span className="badge badge-positive">
+                                <MessageSquare style={{ width: 10, height: 10 }} />
+                                Can send
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                        {!isEditing && !member.isAccountOwner && (
+                          <>
+                            <button
+                              onClick={() => startEditingMember(member)}
+                              className="btn btn-ghost"
+                              style={{ padding: 'var(--space-1)' }}
+                              title="Edit name"
+                            >
+                              <Pencil style={{ width: 14, height: 14 }} />
+                            </button>
+                            <select
+                              value={member.color || '9'}
+                              onChange={(e) => updateFamilyMemberColor(member.id, e.target.value)}
+                              className="select"
+                              style={{ fontSize: 'var(--text-xs)', padding: 'var(--space-1) var(--space-6) var(--space-1) var(--space-2)' }}
+                            >
+                              {CALENDAR_COLORS.map((colorOption) => (
+                                <option key={colorOption.id} value={colorOption.id}>
+                                  {colorOption.name}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              onClick={() => {
+                                if (isConfirming) {
+                                  removeFamilyMember(member.id);
+                                  setConfirmDelete(null);
+                                } else {
+                                  setConfirmDelete(member.id);
+                                }
+                              }}
+                              onBlur={() => setTimeout(() => setConfirmDelete(null), 150)}
+                              className={`btn ${isConfirming ? 'btn-confirm' : 'btn-danger'}`}
+                              style={{ padding: 'var(--space-1)', minWidth: isConfirming ? 70 : 'auto' }}
+                            >
+                              {isConfirming ? (
+                                <span style={{ fontSize: 'var(--text-xs)' }}>Confirm</span>
+                              ) : (
+                                <Trash2 style={{ width: 16, height: 16 }} />
+                              )}
+                            </button>
+                          </>
+                        )}
+                        {member.isAccountOwner && (
+                          <Lock style={{ width: 16, height: 16, color: 'var(--ink-faint)' }} title="Account owner cannot be removed" />
+                        )}
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <select
-                        value={member.color || '9'}
-                        onChange={(e) => updateFamilyMemberColor(member.id, e.target.value)}
-                        className="px-2 py-1 text-sm border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
-                      >
-                        {CALENDAR_COLORS.map((colorOption) => (
-                          <option key={colorOption.id} value={colorOption.id}>
-                            {colorOption.name}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        onClick={() => removeFamilyMember(member.id)}
-                        className="text-red-500 hover:text-red-700"
-                      >
-                        <Trash2 className="w-5 h-5" />
-                      </button>
-                    </div>
+
+                    {/* Contact info (not for account owner - their info is in step 1) */}
+                    {!member.isAccountOwner && (
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-3)', paddingTop: 'var(--space-3)', borderTop: '1px solid var(--edge-muted)' }}>
+                        <div>
+                          <label style={{ display: 'block', fontSize: 'var(--text-xs)', fontWeight: 500, color: 'var(--ink-muted)', marginBottom: 'var(--space-1)' }}>
+                            Phone <span style={{ fontWeight: 400 }}>(optional)</span>
+                          </label>
+                          <input
+                            type="tel"
+                            value={getContactValue(member, 'phone')}
+                            onChange={(e) => handleContactChange(member.id, 'phone', e.target.value)}
+                            onBlur={() => saveContactField(member.id, 'phone')}
+                            placeholder="+1 (555) 123-4567"
+                            className="input"
+                            style={{ fontSize: 'var(--text-sm)', padding: 'var(--space-2) var(--space-3)' }}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ display: 'block', fontSize: 'var(--text-xs)', fontWeight: 500, color: 'var(--ink-muted)', marginBottom: 'var(--space-1)' }}>
+                            Email <span style={{ fontWeight: 400 }}>(optional)</span>
+                          </label>
+                          <input
+                            type="email"
+                            value={getContactValue(member, 'email')}
+                            onChange={(e) => handleContactChange(member.id, 'email', e.target.value)}
+                            onBlur={() => saveContactField(member.id, 'email')}
+                            placeholder="email@example.com"
+                            className="input"
+                            style={{ fontSize: 'var(--text-sm)', padding: 'var(--space-2) var(--space-3)' }}
+                          />
+                        </div>
+                        {(getContactValue(member, 'phone') || getContactValue(member, 'email')) && (
+                          <div style={{ gridColumn: '1 / -1' }}>
+                            <label style={{ display: 'block', fontSize: 'var(--text-xs)', fontWeight: 500, color: 'var(--ink-muted)', marginBottom: 'var(--space-1)' }}>
+                              Notification preference
+                            </label>
+                            <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                              <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', cursor: 'pointer' }}>
+                                <input
+                                  type="radio"
+                                  name={`contactPref-${member.id}`}
+                                  value="email"
+                                  checked={member.contactPreference === 'email'}
+                                  onChange={(e) => updateContactPreference(member.id, e.target.value)}
+                                  className="radio-custom"
+                                  disabled={!getContactValue(member, 'email')}
+                                />
+                                <span style={{ fontSize: 'var(--text-sm)', color: getContactValue(member, 'email') ? 'var(--ink)' : 'var(--ink-faint)' }}>Email</span>
+                              </label>
+                              <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', cursor: 'pointer' }}>
+                                <input
+                                  type="radio"
+                                  name={`contactPref-${member.id}`}
+                                  value="sms"
+                                  checked={member.contactPreference === 'sms'}
+                                  onChange={(e) => updateContactPreference(member.id, e.target.value)}
+                                  className="radio-custom"
+                                  disabled={!getContactValue(member, 'phone')}
+                                />
+                                <span style={{ fontSize: 'var(--text-sm)', color: getContactValue(member, 'phone') ? 'var(--ink)' : 'var(--ink-faint)' }}>SMS</span>
+                              </label>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Show account owner contact summary */}
+                    {member.isAccountOwner && (
+                      <div style={{ display: 'flex', gap: 'var(--space-4)', paddingTop: 'var(--space-2)', fontSize: 'var(--text-sm)', color: 'var(--ink-muted)' }}>
+                        {member.email && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)' }}>
+                            <Mail style={{ width: 14, height: 14 }} />
+                            <span>{member.email}</span>
+                          </div>
+                        )}
+                        {member.phone && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)' }}>
+                            <Phone style={{ width: 14, height: 14 }} />
+                            <span>{member.phone}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}
               {familyMembers.length === 0 && (
-                <p className="text-gray-400 text-center py-8">No family members added yet</p>
+                <div className="empty-state">
+                  <UserPlus className="empty-state-icon" />
+                  <p className="empty-state-text">No family members yet</p>
+                  <p className="empty-state-hint">Complete step 1 first, then add more family members here</p>
+                </div>
               )}
             </div>
           </div>
         )}
 
-        {/* Step 2: Confirmation Preferences */}
-        {step === 2 && (
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-2xl font-bold mb-2">Confirmation preferences</h2>
-              <p className="text-gray-600">How often should we confirm events before adding them?</p>
+        {/* Step 3: Preferences & Timezone */}
+        {step === 3 && (
+          <div className="step-content">
+            <div style={{ marginBottom: 'var(--space-5)' }}>
+              <h2
+                style={{
+                  fontSize: 'var(--text-xl)',
+                  fontWeight: 600,
+                  color: 'var(--ink)',
+                  marginBottom: 'var(--space-1)'
+                }}
+              >
+                Preferences
+              </h2>
+              <p style={{ color: 'var(--ink-muted)', fontSize: 'var(--text-sm)' }}>
+                Configure how the calendar assistant behaves
+              </p>
             </div>
 
-            <div className="space-y-3">
-              {[
-                { value: 'always', label: 'Always', desc: 'Confirm every event before adding' },
-                { value: 'clarification-only', label: 'Only when needed', desc: 'Only ask when something is unclear' },
-                { value: 'never', label: 'Never', desc: 'Add all events automatically' }
-              ].map(option => (
-                <label
-                  key={option.value}
-                  className={`block border-2 rounded-lg p-4 cursor-pointer transition ${
-                    confirmPref === option.value
-                      ? 'border-blue-600 bg-blue-50'
-                      : 'border-gray-200 hover:border-gray-300'
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="confirm"
-                    value={option.value}
-                    checked={confirmPref === option.value}
-                    onChange={(e) => updateConfirmPref(e.target.value)}
-                    className="mr-3"
-                  />
-                  <span className="font-semibold">{option.label}</span>
-                  <p className="text-sm text-gray-600 ml-6">{option.desc}</p>
-                </label>
-              ))}
+            {/* Confirmation preferences */}
+            <div style={{ marginBottom: 'var(--space-6)' }}>
+              <h3 style={{ fontWeight: 600, color: 'var(--ink)', marginBottom: 'var(--space-3)' }}>
+                Confirmation preferences
+              </h3>
+              <p style={{ color: 'var(--ink-muted)', fontSize: 'var(--text-sm)', marginBottom: 'var(--space-3)' }}>
+                How often should we confirm events before adding them?
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+                {[
+                  { value: 'always', label: 'Always', desc: 'Confirm every event before adding' },
+                  { value: 'clarification-only', label: 'Only when needed', desc: 'Only ask when something is unclear' },
+                  { value: 'never', label: 'Never', desc: 'Add all events automatically' }
+                ].map(option => (
+                  <label
+                    key={option.value}
+                    className={`option-card ${confirmPref === option.value ? 'selected' : ''}`}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--space-3)' }}>
+                      <input
+                        type="radio"
+                        name="confirm"
+                        value={option.value}
+                        checked={confirmPref === option.value}
+                        onChange={(e) => updateConfirmPref(e.target.value)}
+                        style={{ marginTop: 2 }}
+                      />
+                      <div>
+                        <span style={{ fontWeight: 500, color: 'var(--ink)' }}>{option.label}</span>
+                        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--ink-muted)', marginTop: 'var(--space-1)' }}>
+                          {option.desc}
+                        </p>
+                      </div>
+                    </div>
+                  </label>
+                ))}
+              </div>
             </div>
 
-            <div className="border-t-2 border-gray-200 pt-6">
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h2 className="text-2xl font-bold mb-2 flex items-center gap-2">
-                    <Globe className="w-6 h-6 text-blue-600" />
-                    Timezone
-                  </h2>
-                  <p className="text-gray-600">Ensure events are scheduled at the correct time</p>
+            {/* Timezone */}
+            <div style={{ borderTop: '1px solid var(--edge)', paddingTop: 'var(--space-6)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 'var(--space-4)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                  <Globe style={{ width: 20, height: 20, color: 'var(--accent)' }} />
+                  <div>
+                    <h3 style={{ fontWeight: 600, color: 'var(--ink)' }}>Timezone</h3>
+                    <p style={{ fontSize: 'var(--text-sm)', color: 'var(--ink-muted)' }}>
+                      Ensure events are scheduled at the correct time
+                    </p>
+                  </div>
                 </div>
                 <button
                   onClick={detectAndSetTimezone}
                   disabled={timezoneDetecting}
-                  className="px-4 py-2 bg-blue-50 text-blue-600 rounded-lg text-sm font-medium hover:bg-blue-100 transition disabled:opacity-50"
+                  className="btn btn-secondary"
+                  style={{ fontSize: 'var(--text-sm)' }}
                 >
                   {timezoneDetecting ? 'Detecting...' : 'Auto-detect'}
                 </button>
               </div>
 
-              <div className="space-y-2">
-                <select
-                  value={timezone}
-                  onChange={(e) => updateTimezone(e.target.value)}
-                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
-                >
-                  {US_TIMEZONES.map((tz) => (
-                    <option key={tz.value} value={tz.value}>
-                      {tz.label} ({tz.offset})
-                    </option>
-                  ))}
-                </select>
-                <p className="text-sm text-gray-500">
-                  Current selection: {getTimezoneLabel(timezone)}
-                </p>
-              </div>
+              <select
+                value={timezone}
+                onChange={(e) => updateTimezone(e.target.value)}
+                className="select"
+                style={{ width: '100%' }}
+              >
+                {US_TIMEZONES.map((tz) => (
+                  <option key={tz.value} value={tz.value}>
+                    {tz.label} ({tz.offset})
+                  </option>
+                ))}
+              </select>
+              <p style={{ fontSize: 'var(--text-xs)', color: 'var(--ink-subtle)', marginTop: 'var(--space-2)' }}>
+                Current selection: {getTimezoneLabel(timezone)}
+              </p>
             </div>
           </div>
         )}
 
-        {/* Step 3: Google Calendar */}
-        {step === 3 && (
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-2xl font-bold mb-2">Connect Google Calendar</h2>
-              <p className="text-gray-600">We'll add events to your calendar with labels for each family member</p>
+        {/* Step 4: Google Calendar */}
+        {step === 4 && (
+          <div className="step-content">
+            <div style={{ marginBottom: 'var(--space-5)' }}>
+              <h2
+                style={{
+                  fontSize: 'var(--text-xl)',
+                  fontWeight: 600,
+                  color: 'var(--ink)',
+                  marginBottom: 'var(--space-1)'
+                }}
+              >
+                Connect Google Calendar
+              </h2>
+              <p style={{ color: 'var(--ink-muted)', fontSize: 'var(--text-sm)' }}>
+                We'll add events to your calendar with labels for each family member
+              </p>
             </div>
 
+            {stepError && (
+              <div className="inline-error">
+                <AlertCircle style={{ width: 16, height: 16, flexShrink: 0 }} />
+                {stepError}
+              </div>
+            )}
+
             {!calendarConnected ? (
-              <div className="text-center py-12">
-                <Calendar className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+              <div style={{ textAlign: 'center', padding: 'var(--space-12) 0' }}>
+                <Calendar
+                  style={{
+                    width: 48,
+                    height: 48,
+                    color: 'var(--ink-faint)',
+                    margin: '0 auto var(--space-5)'
+                  }}
+                />
                 <button
                   onClick={() => {
-                    // Redirect to Google OAuth
                     window.location.href = getGoogleAuthUrl();
                   }}
-                  className="px-6 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition"
+                  className="btn btn-primary"
+                  style={{ fontSize: 'var(--text-base)', padding: 'var(--space-3) var(--space-6)' }}
                 >
                   Connect Google Calendar
                 </button>
-                <p className="text-sm text-gray-500 mt-4">
+                <p style={{ fontSize: 'var(--text-sm)', color: 'var(--ink-subtle)', marginTop: 'var(--space-4)' }}>
                   You'll be redirected to Google to authorize calendar access
                 </p>
               </div>
             ) : (
-              <div className="bg-green-50 border-2 border-green-200 rounded-lg p-6 text-center">
-                <Check className="w-12 h-12 text-green-600 mx-auto mb-3" />
-                <p className="font-semibold text-green-900">Calendar Connected!</p>
-                <p className="text-sm text-green-700 mt-1">{session?.user?.email || 'Connected'}</p>
+              <div className="info-box info-box-positive" style={{ textAlign: 'center' }}>
+                <Check style={{ width: 40, height: 40, color: 'var(--positive)', margin: '0 auto var(--space-3)' }} />
+                <p style={{ fontWeight: 600, color: 'var(--positive)' }}>Calendar Connected</p>
+                <p style={{ fontSize: 'var(--text-sm)', color: 'var(--positive)', marginTop: 'var(--space-1)' }}>
+                  {session?.user?.email || 'Connected'}
+                </p>
               </div>
             )}
           </div>
         )}
 
-        {/* Step 4: Approved Senders */}
-        {step === 4 && (
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-2xl font-bold mb-2">Approved senders</h2>
-              <p className="text-gray-600">Only messages from these contacts will be processed</p>
-              {session?.user?.email && (
-                <p className="text-sm text-blue-600 mt-2">✓ Your email ({session.user.email}) is automatically approved</p>
-              )}
-              <p className="text-sm text-gray-500 mt-2">Enter contacts below and click Continue (or click + to add multiple)</p>
-            </div>
-
-            <div>
-              <h3 className="font-semibold mb-2">Phone Numbers</h3>
-              <div className="flex gap-2 mb-3">
-                <input
-                  type="tel"
-                  value={newPhone}
-                  onChange={(e) => setNewPhone(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && addPhone()}
-                  placeholder="+1 (555) 123-4567"
-                  className="flex-1 px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
-                />
-                <button
-                  onClick={addPhone}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
-                >
-                  <Plus className="w-5 h-5" />
-                </button>
-              </div>
-              <div className="space-y-2">
-                {approvedSenders.phones.map(phone => (
-                  <div
-                    key={phone}
-                    className="flex items-center justify-between bg-gray-50 px-4 py-2 rounded-lg"
-                  >
-                    <span className="font-mono text-sm">{phone}</span>
-                    <button
-                      onClick={() => removePhone(phone)}
-                      className="text-red-500 hover:text-red-700"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <h3 className="font-semibold mb-2">Email Addresses</h3>
-              <div className="flex gap-2 mb-3">
-                <input
-                  type="email"
-                  value={newEmail}
-                  onChange={(e) => setNewEmail(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && addEmail()}
-                  placeholder="email@example.com"
-                  className="flex-1 px-4 py-2 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:outline-none"
-                />
-                <button
-                  onClick={addEmail}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
-                >
-                  <Plus className="w-5 h-5" />
-                </button>
-              </div>
-              <div className="space-y-2">
-                {approvedSenders.emails.map(email => (
-                  <div
-                    key={email}
-                    className="flex items-center justify-between bg-gray-50 px-4 py-2 rounded-lg"
-                  >
-                    <span className="text-sm">{email}</span>
-                    <button
-                      onClick={() => removeEmail(email)}
-                      className="text-red-500 hover:text-red-700"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* Step 5: Review */}
         {step === 5 && (
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-2xl font-bold mb-2">Review your setup</h2>
-              <p className="text-gray-600">Everything look good?</p>
+          <div className="step-content">
+            <div style={{ marginBottom: 'var(--space-5)' }}>
+              <h2
+                style={{
+                  fontSize: 'var(--text-xl)',
+                  fontWeight: 600,
+                  color: 'var(--ink)',
+                  marginBottom: 'var(--space-1)'
+                }}
+              >
+                Review your setup
+              </h2>
+              <p style={{ color: 'var(--ink-muted)', fontSize: 'var(--text-sm)' }}>
+                Everything look good?
+              </p>
             </div>
 
-            <div className="bg-gray-50 rounded-xl p-6 space-y-4">
-              <div>
-                <h3 className="font-semibold mb-2">Family Members</h3>
-                <p className="text-gray-700">{familyMembers.map(m => m.name).join(', ')}</p>
-              </div>
-              <div>
-                <h3 className="font-semibold mb-2">Confirmations</h3>
-                <p className="text-gray-700">
-                  {confirmPref === 'always' ? 'Always confirm before adding events' :
-                   confirmPref === 'never' ? 'Never confirm, add automatically' :
-                   'Only confirm when clarification is needed'}
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold mb-2">Timezone</h3>
-                <p className="text-gray-700">{getTimezoneLabel(timezone)}</p>
-              </div>
-              <div>
-                <h3 className="font-semibold mb-2">Calendar</h3>
-                <p className="text-gray-700">✓ Connected to Google Calendar</p>
-              </div>
-              <div>
-                <h3 className="font-semibold mb-2">Approved Senders</h3>
-                <p className="text-gray-700">
-                  {approvedSenders.phones.length} phone number(s), {approvedSenders.emails.length} email address(es)
-                </p>
+            <div className="surface-sunken" style={{ padding: 'var(--space-5)' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+                {/* Family members */}
+                <div>
+                  <h4 style={{ fontSize: 'var(--text-sm)', fontWeight: 500, color: 'var(--ink-muted)', marginBottom: 'var(--space-2)' }}>
+                    Family Members
+                  </h4>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+                    {familyMembers.map(member => {
+                      const memberColor = CALENDAR_COLORS.find(c => c.id === member.color);
+                      const canSend = canSendMessages(member);
+                      return (
+                        <div key={member.id} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                          <div
+                            style={{
+                              width: 12,
+                              height: 12,
+                              borderRadius: '50%',
+                              backgroundColor: memberColor?.color || '#5484ed',
+                              flexShrink: 0
+                            }}
+                          />
+                          <span style={{ color: 'var(--ink)' }}>{member.name}</span>
+                          {member.isAccountOwner && (
+                            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--ink-muted)' }}>(you)</span>
+                          )}
+                          {canSend && (
+                            <span className="badge badge-positive" style={{ marginLeft: 'auto' }}>
+                              <MessageSquare style={{ width: 10, height: 10 }} />
+                              Can send
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div>
+                  <h4 style={{ fontSize: 'var(--text-sm)', fontWeight: 500, color: 'var(--ink-muted)', marginBottom: 'var(--space-1)' }}>
+                    Confirmations
+                  </h4>
+                  <p style={{ color: 'var(--ink)' }}>
+                    {confirmPref === 'always' ? 'Always confirm before adding events' :
+                     confirmPref === 'never' ? 'Never confirm, add automatically' :
+                     'Only confirm when clarification is needed'}
+                  </p>
+                </div>
+                <div>
+                  <h4 style={{ fontSize: 'var(--text-sm)', fontWeight: 500, color: 'var(--ink-muted)', marginBottom: 'var(--space-1)' }}>
+                    Timezone
+                  </h4>
+                  <p style={{ color: 'var(--ink)' }}>{getTimezoneLabel(timezone)}</p>
+                </div>
+                <div>
+                  <h4 style={{ fontSize: 'var(--text-sm)', fontWeight: 500, color: 'var(--ink-muted)', marginBottom: 'var(--space-1)' }}>
+                    Calendar
+                  </h4>
+                  <p style={{ color: 'var(--positive)' }}>Connected to Google Calendar</p>
+                </div>
+                <div>
+                  <h4 style={{ fontSize: 'var(--text-sm)', fontWeight: 500, color: 'var(--ink-muted)', marginBottom: 'var(--space-1)' }}>
+                    Who can send messages
+                  </h4>
+                  <p style={{ color: 'var(--ink)' }}>
+                    {getSenderCount()} family member(s) with phone or email
+                  </p>
+                </div>
               </div>
             </div>
           </div>
         )}
 
         {/* Navigation */}
-        <div className="flex gap-3 mt-8">
+        <div style={{ display: 'flex', gap: 'var(--space-3)', marginTop: 'var(--space-8)' }}>
           {step > 1 && (
-            <button
-              onClick={prevStep}
-              className="px-6 py-3 border-2 border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-50 transition"
-            >
+            <button onClick={prevStep} className="btn btn-secondary">
               Back
             </button>
           )}
           <button
             onClick={nextStep}
-            className="flex-1 px-6 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition"
+            className="btn btn-primary"
+            style={{ flex: 1 }}
           >
             {step === 5 ? 'Complete Setup' : 'Continue'}
           </button>

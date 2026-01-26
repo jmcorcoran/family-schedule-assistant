@@ -26,14 +26,20 @@ export default function OAuthCallback({ onSuccess, onError }) {
 
       setStatus('exchanging');
 
-      // Exchange code for tokens
-      const tokens = await exchangeCodeForTokens(code);
+      // Get accountId from localStorage
+      const accountId = localStorage.getItem('accountId');
+      if (!accountId) {
+        throw new Error('No account ID found. Please complete setup first.');
+      }
+
+      // Exchange code for tokens via server-side function
+      await exchangeCodeForTokens(code, accountId);
 
       setStatus('success');
 
-      // Call success callback with tokens
+      // Call success callback
       if (onSuccess) {
-        onSuccess(tokens);
+        onSuccess();
       }
     } catch (error) {
       console.error('OAuth callback error:', error);

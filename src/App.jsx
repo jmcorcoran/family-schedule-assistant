@@ -682,58 +682,12 @@ export default function App() {
     if (step > 1) setStep(step - 1);
   };
 
-  const handleOAuthSuccess = async (tokens) => {
-    try {
-      // Get accountId from localStorage since state might not be loaded yet
-      const savedAccountId = localStorage.getItem('accountId');
-
-      console.log('OAuth callback - checking localStorage...');
-      console.log('accountId from localStorage:', savedAccountId);
-      console.log('supabase configured:', !!supabase);
-      console.log('All localStorage keys:', Object.keys(localStorage));
-
-      if (!savedAccountId || !supabase) {
-        console.error('No account ID in localStorage or Supabase not configured');
-        console.error('savedAccountId:', savedAccountId);
-        console.error('supabase:', supabase);
-        alert('Account not found. Please complete setup first.');
-        window.location.href = '/';
-        return;
-      }
-
-      console.log('Saving tokens for account:', savedAccountId);
-
-      // Calculate token expiry (typically 3600 seconds = 1 hour)
-      const expiresAt = new Date();
-      expiresAt.setSeconds(expiresAt.getSeconds() + (tokens.expires_in || 3600));
-
-      // Save tokens to Supabase
-      const { data, error } = await supabase
-        .from('accounts')
-        .update({
-          google_access_token: tokens.access_token,
-          google_refresh_token: tokens.refresh_token,
-          google_token_expires_at: expiresAt.toISOString(),
-          google_calendar_id: 'primary' // We'll use the primary calendar
-        })
-        .eq('id', savedAccountId)
-        .select();
-
-      if (error) {
-        console.error('Supabase error:', error);
-        throw error;
-      }
-
-      console.log('Tokens saved successfully:', data);
-
-      // Redirect back to setup at step 4 with calendar connected
-      localStorage.setItem('returnToStep', '4');
-      window.location.href = '/';
-    } catch (error) {
-      console.error('Error saving Google tokens:', error);
-      alert('Failed to save calendar connection. Please try again.');
-      window.location.href = '/';
-    }
+  const handleOAuthSuccess = async () => {
+    // Tokens are saved server-side by the edge function
+    // Just redirect back to the app
+    console.log('OAuth successful, redirecting...');
+    localStorage.setItem('returnToStep', '4');
+    window.location.href = '/family-schedule-assistant/';
   };
 
   const handleLogout = async () => {

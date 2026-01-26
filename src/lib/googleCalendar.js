@@ -1,5 +1,8 @@
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
-const GOOGLE_REDIRECT_URI = import.meta.env.VITE_GOOGLE_REDIRECT_URI;
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+
+// The redirect URI - must match what's configured in Google Cloud Console
+const GOOGLE_REDIRECT_URI = 'https://jmcorcoran.github.io/family-schedule-assistant/auth/callback';
 
 // OAuth scopes we need
 const SCOPES = [
@@ -24,59 +27,28 @@ export function getGoogleAuthUrl() {
 }
 
 /**
- * Exchange authorization code for access token
+ * Exchange authorization code for access token via server-side function
+ * (Client secret is kept secure on the server)
  */
-export async function exchangeCodeForTokens(code) {
-  const params = new URLSearchParams({
-    code,
-    client_id: GOOGLE_CLIENT_ID,
-    client_secret: import.meta.env.VITE_GOOGLE_CLIENT_SECRET,
-    redirect_uri: GOOGLE_REDIRECT_URI,
-    grant_type: 'authorization_code'
-  });
-
-  const response = await fetch('https://oauth2.googleapis.com/token', {
+export async function exchangeCodeForTokens(code, accountId) {
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/google-oauth-callback`, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
+      'Content-Type': 'application/json',
     },
-    body: params.toString()
+    body: JSON.stringify({ code, accountId })
   });
 
   if (!response.ok) {
     const error = await response.json();
-    throw new Error(`Failed to exchange code: ${error.error_description || error.error}`);
+    throw new Error(error.error || 'Failed to exchange code');
   }
 
   return await response.json();
 }
 
-/**
- * Refresh an expired access token
- */
-export async function refreshAccessToken(refreshToken) {
-  const params = new URLSearchParams({
-    refresh_token: refreshToken,
-    client_id: GOOGLE_CLIENT_ID,
-    client_secret: import.meta.env.VITE_GOOGLE_CLIENT_SECRET,
-    grant_type: 'refresh_token'
-  });
-
-  const response = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: params.toString()
-  });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(`Failed to refresh token: ${error.error_description || error.error}`);
-  }
-
-  return await response.json();
-}
+// Token refresh is handled server-side in the process-message function
+// to keep the client secret secure
 
 /**
  * Add an event to Google Calendar

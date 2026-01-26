@@ -706,7 +706,7 @@ export default function App() {
   };
 
   // Handle OAuth callback
-  if (window.location.pathname === '/auth/callback') {
+  if (window.location.pathname === '/family-schedule-assistant/auth/callback' || window.location.pathname === '/auth/callback') {
     return (
       <OAuthCallback
         onSuccess={handleOAuthSuccess}
